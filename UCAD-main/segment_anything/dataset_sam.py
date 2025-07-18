@@ -46,7 +46,7 @@ if __name__=="__main__":
     opt = parser.parse_args()
     sam_checkpoint = opt.sam_checkpoint
     model_type = opt.sam_type
-    device = "cuda"
+    device = "cpu" if not torch.cuda.is_available() else "cuda"
     sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
     sam.to(device=device)
 

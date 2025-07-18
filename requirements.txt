@@ -1,0 +1,17 @@
+numpy
+torch
+matplotlib
+scikit-learn
+pandas
+seaborn
+scipy
+opencv-python
+torchvision
+click
+tqdm
+timm
+faiss-cpu
+scipy
+scikit
+imgaug
+open_clip_torch
