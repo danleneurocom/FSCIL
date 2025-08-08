@@ -12,6 +12,7 @@ tqdm
 timm
 faiss-cpu
 scipy
-scikit
+scikit-learn
+scikit-image
 imgaug
 open_clip_torch
