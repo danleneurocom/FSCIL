@@ -12,9 +12,6 @@ from sklearn.metrics import roc_auc_score
 import torch.nn.functional as F
 import torch.nn as nn
 from torchvision.models import wide_resnet50_2
-from typing import List, Dict, Any
-from PIL import Image
-import torch
 from torch.utils.data._utils.collate import default_collate
 import math
 from scipy.ndimage import gaussian_filter
@@ -29,7 +26,7 @@ from segment_anything import sam_model_registry, SamPredictor
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 DATA_ROOT = "/Users/lenguyenlinhdan/Downloads/FSCIL_TCDS/mvtec2d"
-DEVICE = torch.device("cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 # --- MVTecAD Dataset Class (remains the same) ---
@@ -113,9 +110,10 @@ class MVTecAD(Dataset):
         m = Image.open(mp).convert("L")
         m = self.mask_resize(m)
         m = self.mask_center(m)
-        m = torch.from_numpy((torch.ByteTensor(torch.ByteStorage.from_buffer(m.tobytes()))
-                              .view(m.height, m.width).numpy() > 0).astype("float32"))
-        return m.unsqueeze(0)
+        m_np = np.array(m, dtype=np.uint8)
+        m_tensor = torch.from_numpy((m_np > 0).astype("float32"))
+        return m_tensor.unsqueeze(0)
+
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         img_pil = self._load_image(self.img_paths[idx])
@@ -302,9 +300,12 @@ def _system2_refine(predictor: SamPredictor,
             break
     return curr_mask
 
-# --- FeatureExtractor and PatchCore training/testing functions ---
+# --- OPTIMIZED: FeatureExtractor with Fast/Slow Prompts ---
 class FeatureExtractor(nn.Module):
-    def __init__(self, backbone_name, layers_to_extract_from, common_size=(16, 16)):
+    def __init__(self, backbone_name, layers_to_extract_from,
+                 common_size=(16, 16),
+                 fast_prompt_size=8, slow_prompt_size=8,
+                 common_dim=256):
         super().__init__()
         backbone = wide_resnet50_2(weights='IMAGENET1K_V1')
         self.initial_layers = nn.Sequential(
@@ -315,18 +316,19 @@ class FeatureExtractor(nn.Module):
         self.common_size = common_size
         layer_map = {'layer2': backbone.layer2, 'layer3': backbone.layer3, 'layer4': backbone.layer4}
         output_dims = {'layer2': 512, 'layer3': 1024, 'layer4': 2048}
-        self.common_dim = 256
+        self.common_dim = common_dim
+
         for layer_name in layers_to_extract_from:
             self.feature_extractor[layer_name] = layer_map[layer_name]
             self.projectors[layer_name] = nn.Sequential(
                 nn.AdaptiveAvgPool2d(common_size),
                 nn.Conv2d(output_dims[layer_name], self.common_dim, kernel_size=1)
             )
-        
-        # New: Add fast and slow prompt embeddings
-        self.fast_prompt_embeddings = nn.Parameter(torch.randn(1, 16, self.common_dim))
-        self.slow_prompt_embeddings = nn.Parameter(torch.randn(1, 16, self.common_dim))
 
+        # Brain-inspired fast and slow prompt embeddings
+        self.fast_prompt_embeddings = nn.Parameter(torch.randn(1, fast_prompt_size, self.common_dim))
+        self.slow_prompt_embeddings = nn.Parameter(torch.randn(1, slow_prompt_size, self.common_dim))
+        self.num_prompts = fast_prompt_size + slow_prompt_size
 
     def forward(self, x):
         x = self.initial_layers(x)
@@ -335,37 +337,130 @@ class FeatureExtractor(nn.Module):
             x = layer(x)
             projected_x = self.projectors[name](x)
             processed_features.append(projected_x)
-        
-        # Sum features instead of concatenating to maintain common_dim
+
         stacked_features = torch.stack(processed_features, dim=0)
         combined_features = torch.sum(stacked_features, dim=0)
 
-        B, C_combined, H, W = combined_features.shape
+        B, C, H, W = combined_features.shape
         N_PATCHES = H * W
-        
-        patch_features = combined_features.permute(0, 2, 3, 1).view(B, N_PATCHES, C_combined)
-        
-        # New: Concatenate the fast and slow prompts to the patch features
+        patch_features = combined_features.permute(0, 2, 3, 1).reshape(B, N_PATCHES, C)
+
+        # Concatenate the fast and slow prompts to the patch features
         fast_prompt = self.fast_prompt_embeddings.expand(B, -1, -1)
         slow_prompt = self.slow_prompt_embeddings.expand(B, -1, -1)
-        
-        combined_output = torch.cat([fast_prompt, slow_prompt, patch_features], dim=1)
-        
+        combined_output = torch.cat([slow_prompt, fast_prompt, patch_features], dim=1)
         return combined_output
 
 def train_patchcore(train_loader, feature_extractor):
+    """Builds the memory bank using the current state of the feature extractor."""
     memory_bank = []
     feature_extractor.eval()
     with torch.no_grad():
-        for batch in train_loader:
+        for batch in tqdm(train_loader, desc="Building Memory Bank"):
             images = batch["image"].to(DEVICE)
-            # Remove the fast/slow prompt training here, as it's not part of the standard PatchCore.
-            # We will use a standard PatchCore training loop to build the memory bank.
-            patch_features = feature_extractor(images)[:, 32:, :]
+            # We only use patch features for the memory bank, not prompts
+            patch_features = feature_extractor(images)[:, feature_extractor.num_prompts:, :]
             for features in patch_features:
-                memory_bank.append(features.view(-1, features.shape[-1]))
+                memory_bank.append(features.reshape(-1, features.shape[-1]))
     memory_bank = torch.cat(memory_bank, dim=0)
     return memory_bank
+
+
+# --- NEW: Meta-Learning Training Function for Prompts ---
+def train_with_meta_learning(
+    feature_extractor: FeatureExtractor,
+    train_loader: DataLoader,
+    memory_bank: Optional[torch.Tensor],
+    epochs: int = 5,
+    inner_lr: float = 0.03,
+    outer_lr: float = 1e-4,
+    inner_steps: int = 3
+):
+    """
+    Updates the fast and slow prompts using a meta-learning strategy.
+    """
+    print("Starting meta-learning for fast and slow prompts...")
+    feature_extractor.train() # Set model to training mode
+
+    # Freeze backbone, only prompts are trainable
+    for param in feature_extractor.parameters():
+        param.requires_grad = False
+    feature_extractor.fast_prompt_embeddings.requires_grad = True
+    feature_extractor.slow_prompt_embeddings.requires_grad = True
+
+    # Optimizers for fast (inner loop) and slow (outer loop) prompts
+    optimizer_slow = torch.optim.Adam([feature_extractor.slow_prompt_embeddings], lr=outer_lr)
+
+    for epoch in range(epochs):
+        total_loss = 0.0
+        pbar = tqdm(train_loader, desc=f"Meta-Training Epoch {epoch+1}/{epochs}")
+        for batch in pbar:
+            images = batch["image"].to(DEVICE)
+            
+            batch_size = images.shape[0]
+            if batch_size < 2: continue
+            split_idx = batch_size // 2
+            support_images = images[:split_idx]
+            query_images = images[split_idx:]
+            
+            # --- INNER LOOP: Update Fast Prompts ---
+            temp_fast_prompts = feature_extractor.fast_prompt_embeddings.clone().detach().requires_grad_(True)
+            optimizer_fast = torch.optim.SGD([temp_fast_prompts], lr=inner_lr)
+
+            for _ in range(inner_steps):
+                optimizer_fast.zero_grad()
+                
+                B, C_img, H_img, W_img = support_images.shape
+                with torch.no_grad():
+                    initial_out = feature_extractor.initial_layers(support_images)
+                    processed_feats = []
+                    x_temp = initial_out
+                    # *** FIXED BUG HERE ***
+                    # Iterate over items (name, layer) not values
+                    for name, layer in feature_extractor.feature_extractor.items():
+                        x_temp = layer(x_temp)
+                        processed_feats.append(feature_extractor.projectors[name](x_temp))
+                    
+                    combined_features = torch.sum(torch.stack(processed_feats, dim=0), dim=0)
+                    C_feat = combined_features.shape[1]
+                    patch_features = combined_features.permute(0, 2, 3, 1).reshape(B, -1, C_feat)
+
+                fast_prompt = temp_fast_prompts.expand(B, -1, -1)
+                slow_prompt = feature_extractor.slow_prompt_embeddings.expand(B, -1, -1)
+                
+                full_features = torch.cat([slow_prompt, fast_prompt, patch_features], dim=1)
+                
+                dists = torch.cdist(full_features.view(-1, C_feat), memory_bank)
+                min_d, _ = torch.min(dists, dim=1)
+                
+                anomaly_scores = torch.amax(min_d.reshape(B, -1), dim=1)
+                loss_fast = torch.mean(anomaly_scores)
+                
+                loss_fast.backward()
+                optimizer_fast.step()
+
+            # --- OUTER LOOP: Update Slow Prompts ---
+            optimizer_slow.zero_grad()
+            feature_extractor.fast_prompt_embeddings.data = temp_fast_prompts.data
+
+            B, C_feat, H, W = query_images.shape
+            full_features_query = feature_extractor(query_images)
+            
+            dists_query = torch.cdist(full_features_query.reshape(-1, C_feat), memory_bank)
+            min_d_query, _ = torch.min(dists_query, dim=1)
+            anomaly_scores_query = torch.amax(min_d_query.reshape(B, -1), dim=1)
+            loss_slow = torch.mean(anomaly_scores_query)
+            
+            loss_slow.backward()
+            optimizer_slow.step()
+
+            total_loss += loss_slow.item()
+            pbar.set_postfix({"loss": f"{loss_slow.item():.4f}"})
+        
+        print(f"Epoch {epoch+1} average meta-loss: {total_loss / len(train_loader):.4f}")
+
+    feature_extractor.eval()
+    return feature_extractor
 
 
 def test_patchcore_sam(
@@ -381,6 +476,7 @@ def test_patchcore_sam(
     print("Testing with PatchCore + SAM (Fast&Slow prompts)...")
     feature_extractor.eval()
     feature_extractor.to(DEVICE)
+    memory_bank = memory_bank.to(DEVICE)
 
     gt_labels = []
     image_scores = []
@@ -395,14 +491,15 @@ def test_patchcore_sam(
             original_pil_images = batch["image_pil"]
 
             patch_features_full = feature_extractor(images)
-            patch_features = patch_features_full[:, 32:, :]
-
-            B, N_PATCHES, C = patch_features.shape
-            feats_flat = patch_features.reshape(-1, C)
-            dists = torch.cdist(feats_flat, memory_bank)
+            
+            B, _, C = patch_features_full.shape
+            
+            dists = torch.cdist(patch_features_full.reshape(-1, C), memory_bank)
             min_d, _ = torch.min(dists, dim=1)
-            side = int(math.sqrt(N_PATCHES))
-            anomaly_map = min_d.view(B, side, side)
+            
+            side_len = int(math.sqrt(patch_features_full.shape[1] - feature_extractor.num_prompts))
+            patch_scores = min_d.reshape(B, -1)[:, feature_extractor.num_prompts:]
+            anomaly_map = patch_scores.reshape(B, side_len, side_len)
 
             Ht, Wt = images.shape[-2:]
             anomaly_map_resized = F.interpolate(
@@ -467,15 +564,6 @@ def test_patchcore_sam(
     )
 
 
-def pad_mask_to_match_target(mask: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
-    h_target, w_target = target_shape
-    h_current, w_current = mask.shape
-    if h_current == h_target and w_current == w_target:
-        return mask
-    padded_mask = np.zeros(target_shape, dtype=mask.dtype)
-    padded_mask[:h_current, :w_current] = mask
-    return padded_mask
-
 def train_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     collated_batch = {
         "image": default_collate([d["image"] for d in batch]),
@@ -506,52 +594,13 @@ def get_continual_test_loaders(seen_categories: List[str], data_root: str, image
 def coreset_subsampling(memory_bank: torch.Tensor, max_size: int) -> torch.Tensor:
     """
     Performs coreset subsampling to reduce the memory bank size.
-    This is a simplified version; a full implementation is more complex.
+    This is a simplified version using random sampling.
     """
     if memory_bank.shape[0] <= max_size:
         return memory_bank
     
-    # Randomly select a subset of features
     indices = random.sample(range(memory_bank.shape[0]), max_size)
     return memory_bank[indices]
-
-def calculate_f_measure(
-    gt_masks_flat: np.ndarray,
-    pixel_scores_flat: np.ndarray,
-    thresholds: np.ndarray
-) -> float:
-    """
-    Calculates the maximum F-measure score across a range of thresholds.
-
-    Args:
-        gt_masks_flat (np.ndarray): Flattened ground truth masks (binary values).
-        pixel_scores_flat (np.ndarray): Flattened predicted pixel scores.
-        thresholds (np.ndarray): A range of thresholds to test.
-
-    Returns:
-        float: The maximum F-measure score.
-    """
-    max_f_measure = 0.0
-    for threshold in thresholds:
-        # Binarize predictions based on the current threshold
-        predicted_masks = (pixel_scores_flat >= threshold).astype(np.int32)
-        
-        # Calculate True Positives, False Positives, and False Negatives
-        tp = np.sum((predicted_masks == 1) & (gt_masks_flat == 1))
-        fp = np.sum((predicted_masks == 1) & (gt_masks_flat == 0))
-        fn = np.sum((predicted_masks == 0) & (gt_masks_flat == 1))
-        
-        # Handle division by zero
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        
-        # Calculate F-measure (F1-score)
-        f_measure = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-        
-        if f_measure > max_f_measure:
-            max_f_measure = f_measure
-            
-    return max_f_measure
 
 def run_continual_learning(
     categories: List[str],
@@ -562,16 +611,15 @@ def run_continual_learning(
     max_memory_bank_size: int = 100000,
 ):
     """
-    Orchestrates the entire continual learning pipeline.
+    Orchestrates the entire continual learning pipeline with meta-learning prompts.
     """
     sam_predictor = SamPredictor(sam_model_registry["vit_b"](checkpoint=sam_checkpoint).to(device=DEVICE))
     
     feature_extractor = FeatureExtractor(
         backbone_name='wide_resnet50_2',
         layers_to_extract_from=['layer2', 'layer3']
-    )
+    ).to(DEVICE)
     
-    # We will aggregate the memory bank over tasks
     combined_memory_bank = None
     seen_categories = []
 
@@ -579,66 +627,54 @@ def run_continual_learning(
         print(f"\n--- Starting Task {task_idx+1}/{len(categories)}: {category} ---")
         seen_categories.append(category)
 
-        # Step 1: Train on the new category
-        train_ds, _, train_loader, _ = load_mvtec_category(
+        # Step 1: Load data for the new category
+        _, _, train_loader, _ = load_mvtec_category(
             root=data_root, category=category, image_size=image_size, batch_size=batch_size
         )
+        
+        # Step 2: Adapt feature extractor using meta-learning if not the first task
+        if combined_memory_bank is not None and len(combined_memory_bank) > 0:
+            feature_extractor = train_with_meta_learning(
+                feature_extractor, train_loader, combined_memory_bank.to(DEVICE)
+            )
+
+        # Step 3: Build/update the memory bank with features from the adapted model
         current_task_memory = train_patchcore(train_loader, feature_extractor)
 
-        # Step 2: Update the memory bank
         if combined_memory_bank is None:
             combined_memory_bank = current_task_memory
         else:
-            combined_memory_bank = torch.cat([combined_memory_bank, current_task_memory], dim=0)
+            combined_memory_bank = torch.cat([combined_memory_bank.cpu(), current_task_memory.cpu()], dim=0)
         
         # Coreset subsampling to manage memory bank size
         combined_memory_bank = coreset_subsampling(combined_memory_bank, max_memory_bank_size)
         print(f"Memory bank size after task {task_idx+1}: {combined_memory_bank.shape[0]}")
 
-        # Step 3: Evaluate on all seen categories
+        # Step 4: Evaluate on all seen categories
         test_loader = get_continual_test_loaders(seen_categories, data_root, image_size, batch_size)
         
         gt_labels, image_scores, gt_masks, pixel_scores = test_patchcore_sam(
             test_loader, feature_extractor, combined_memory_bank, sam_predictor
         )
         
-        # Evaluate performance
+        # --- Corrected Performance Evaluation ---
+        # Image-level AUROC
         image_auroc = roc_auc_score(gt_labels, image_scores)
-        gt_masks_flat = gt_masks.flatten()
-        pixel_scores_flat = pixel_scores.flatten()
-        
-        # Ensure we only evaluate on ground truth positive pixels
-        gt_masks_filtered = gt_masks_flat[gt_masks_flat == 1]
-        pixel_scores_filtered = pixel_scores_flat[gt_masks_flat == 1]
 
-        # Calculate AUROC for pixels on non-good images.
-        pixel_auroc = roc_auc_score(gt_masks_flat, pixel_scores_flat)
-        
-        # The following two lines were incorrect and have been updated.
-        all_gt_labels = gt_labels.repeat(IMAGE_SIZE * IMAGE_SIZE)
-        all_gt_masks_flat = gt_masks.flatten()
-        all_pixel_scores_flat = pixel_scores.flatten()
-
-        # Filter for images that are not 'good'
-        non_good_indices = np.where(all_gt_labels > 0)
-        gt_masks_non_good = all_gt_masks_flat[non_good_indices]
-        pixel_scores_non_good = all_pixel_scores_flat[non_good_indices]
-
-        # Now calculate the AUROC correctly on the non-good images
-        if len(gt_masks_non_good) > 0:
-            pixel_auroc = roc_auc_score(gt_masks_non_good, pixel_scores_non_good)
+        # Pixel-level AUROC (only on anomalous images)
+        # Find indices of images that are not "good"
+        anomaly_indices = np.where(gt_labels == 1)[0]
+        if len(anomaly_indices) > 0:
+            gt_masks_anomalous = gt_masks[anomaly_indices].flatten()
+            pixel_scores_anomalous = pixel_scores[anomaly_indices].flatten()
+            pixel_auroc = roc_auc_score(gt_masks_anomalous, pixel_scores_anomalous)
         else:
-            pixel_auroc = np.nan
-            
-        # Calculate F-measure only on the non-good images for relevance
-        thresholds = np.linspace(0.0, 1.0, 100)
-        f_measure = calculate_f_measure(gt_masks_non_good, pixel_scores_non_good, thresholds)
+            pixel_auroc = np.nan # No anomalous samples to evaluate on
 
         print(f"\n--- Cumulative Results after training on {category} ---")
         print(f"Categories evaluated: {seen_categories}")
         print(f"Image-level AUROC: {image_auroc:.4f}")
         print(f"Pixel-level AUROC: {pixel_auroc:.4f}")
-        print(f"Pixel-level F-measure: {f_measure:.4f}")
 
 
 if __name__ == '__main__':
@@ -671,4 +707,4 @@ if __name__ == '__main__':
         image_size=IMAGE_SIZE,
         batch_size=BATCH_SIZE,
         sam_checkpoint=sam_checkpoint
-    )
+    ) 
