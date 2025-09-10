@@ -47,7 +47,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
 
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
 try:
@@ -982,6 +982,33 @@ def calculate_pixel_auroc(gt_masks: np.ndarray, pixel_scores: np.ndarray, gt_lab
     pixel_scores_non_good = pixel_scores_reshaped[non_good_idx].flatten()
     return roc_auc_score(gt_masks_non_good, pixel_scores_non_good)
 
+def calculate_pixel_aupr_all(gt_masks: np.ndarray, pixel_scores: np.ndarray) -> float:
+    """Pixel-level AUPR over all pixels (normal + anomalous)."""
+    y_true = gt_masks.reshape(-1).astype(np.uint8)
+    y_score = pixel_scores.reshape(-1).astype(np.float32)
+    return average_precision_score(y_true, y_score)
+
+def forgetting_measure(T_rows: list[list[float]]) -> float:
+    """
+    FM per Eq.(7): avg over past tasks of (best-so-far metric - current metric on that task).
+    T_rows[k] contains metrics for tasks seen up to step k (same order).
+    Returns FM for the *last* step (current model).
+    """
+    k = len(T_rows)
+    if k <= 1:
+        return 0.0
+    max_tasks = max(len(r) for r in T_rows)
+    T = np.full((k, max_tasks), np.nan, dtype=np.float32)
+    for i, r in enumerate(T_rows):
+        T[i, :len(r)] = r
+    diffs = []
+    for j in range(k - 1):
+        prev_best = np.nanmax(T[:k-1, j])
+        now = T[k-1, j]
+        diffs.append(prev_best - now)
+    return float(np.nanmean(diffs))
+
+
 def _true_category_from_path(p: str) -> str:
     # mvtec path: .../<category>/test/<defect_type>/xxx.png
     parts = Path(p).parts
@@ -1033,6 +1060,10 @@ def run_ucad(
     ucad_mem = UCADMemory()
     calib_stats: Dict[str, Dict[str, float]] = {}  # per-task {mu, sigma, thr}
     seen_categories: List[str] = []
+
+    # histories for FM
+    hist_img_rows: list[list[float]] = []  # row k: image AUROC for tasks 0..k
+    hist_pix_rows: list[list[float]] = []  # row k: pixel AUPR (all pixels) for tasks 0..k
 
     for task_idx, category in enumerate(categories):
         print(f"\n=== Task {task_idx+1}/{len(categories)}: {category} ===")
@@ -1090,13 +1121,12 @@ def run_ucad(
             ucad_mem=ucad_mem,
             train_loader=train_loader,
             task_name=category,
-            topk=image_topk_ratio,         # <-- was 'topk_ratio'; correct kw is 'topk'
+            topk=image_topk_ratio,
             sigma_mult=3.0,
         )
         if mu is not None:
             sigma = max(float(sigma), 1e-6)
             calib_stats[category] = {"mu": float(mu), "sigma": sigma, "thr": float(thr)}
-            # also persist into UCADMemory (used by select_task_by_imgscore if you switch to it)
             ucad_mem.mem[category].mu = float(mu)
             ucad_mem.mem[category].sigma = sigma
             print(f"[calib] {category}: mu={mu:.4f} sigma={sigma:.4f} thr={thr:.4f}")
@@ -1105,36 +1135,102 @@ def run_ucad(
 
         # ----- Evaluate on all seen categories (task-agnostic) -----
         test_loader = get_continual_test_loaders(seen_categories, data_root, image_size, batch_size)
+
+        # global aggregates
         gt_labels_all: List[int] = []
         image_scores_all: List[float] = []
         gt_masks_all: List[np.ndarray] = []
         pixel_maps_all: List[np.ndarray] = []
 
+        # per-category aggregates (for per-task metrics & FM rows)
+        per_task = {cat: {"y_img": [], "s_img": [], "y_pix": [], "s_pix": []} for cat in seen_categories}
+
+        # routing accuracy counters
+        correct_keys = 0
+        correct_imgscore = 0
+        total_imgs = 0
+
         for batch in tqdm(test_loader, desc="Testing"):
             imgs = batch["image"].to(DEVICE)
             labels = batch["label"].cpu().numpy()
             gt_masks = batch["mask"].squeeze(1).cpu().numpy()
+            paths = batch["path"]
 
+            # --- routing checks (keys vs calibrated image score) ---
+            pred_keys = select_task_by_keys(extractor, prompt_bank, ucad_mem, imgs, key_layer=meta.cfg.key_layer)
+            pred_imgscore = select_task_by_imgscore(extractor, prompt_bank, ucad_mem, imgs, q=image_topk_ratio)
+
+            true_cats = [_true_category_from_path(p) for p in paths]
+            correct_keys += sum(1 for a, b in zip(pred_keys, true_cats) if a == b)
+            correct_imgscore += sum(1 for a, b in zip(pred_imgscore, true_cats) if a == b)
+            total_imgs += len(true_cats)
+
+            # --- anomaly inference (uses keys-based routing internally) ---
             img_scores, maps = infer_batch_anomaly(
                 extractor, prompt_bank, ucad_mem, imgs,
                 key_layer=meta.cfg.key_layer,
                 image_topk_ratio=image_topk_ratio,
-                calib_stats=calib_stats,    # z-score per task
+                calib_stats=calib_stats,
             )
 
-            # Upsample maps to image size for pixel metrics
+            # Upsample & normalize maps
             Ht, Wt = imgs.shape[-2:]
             maps_up = F.interpolate(maps.unsqueeze(1), size=(Ht, Wt), mode='bilinear', align_corners=False).squeeze(1)
-            # normalize per image
             minv = maps_up.view(maps_up.size(0), -1).min(dim=1).values.view(-1, 1, 1)
             maxv = maps_up.view(maps_up.size(0), -1).max(dim=1).values.view(-1, 1, 1)
             maps_up = (maps_up - minv) / (maxv - minv + 1e-8)
 
+            # global aggregates
             gt_labels_all.append(labels)
             image_scores_all.append(img_scores.cpu().numpy())
             gt_masks_all.append(gt_masks)
             pixel_maps_all.append(maps_up.cpu().numpy())
 
+            # per-category aggregates
+            for i, p in enumerate(paths):
+                cat = _true_category_from_path(p)
+                per_task[cat]["y_img"].append(int(labels[i]))
+                per_task[cat]["s_img"].append(float(img_scores[i].item()))
+                per_task[cat]["y_pix"].append(gt_masks[i])               # (H, W)
+                per_task[cat]["s_pix"].append(maps_up[i].cpu().numpy())  # (H, W)
+
+        # --- print routing accuracies
+        if total_imgs > 0:
+            print(f"[routing] keys-based accuracy:     {correct_keys}/{total_imgs} = {correct_keys/total_imgs:.3f}")
+            print(f"[routing] imgscore-based accuracy: {correct_imgscore}/{total_imgs} = {correct_imgscore/total_imgs:.3f}")
+
+        # --- per-task metrics
+        print("\nPer-task Image AUROC:")
+        percat_img = []
+        for cat in seen_categories:
+            y = np.asarray(per_task[cat]["y_img"], dtype=np.int64)
+            s = np.asarray(per_task[cat]["s_img"], dtype=np.float32)
+            if len(y) > 0 and len(np.unique(y)) > 1:
+                val = roc_auc_score(y, s)
+                percat_img.append(val)
+                print(f"  {cat:<11}: {val:.4f}")
+            else:
+                percat_img.append(float('nan'))
+                print(f"  {cat:<11}: n/a")
+
+        print("Per-task Pixel AUPR (all pixels):")
+        percat_pix = []
+        for cat in seen_categories:
+            if len(per_task[cat]["y_pix"]) > 0:
+                y_pix = np.stack(per_task[cat]["y_pix"], axis=0)
+                s_pix = np.stack(per_task[cat]["s_pix"], axis=0)
+                val = calculate_pixel_aupr_all(y_pix, s_pix)
+                percat_pix.append(val)
+                print(f"  {cat:<11}: {val:.4f}")
+            else:
+                percat_pix.append(float('nan'))
+                print(f"  {cat:<11}: n/a")
+
+        # push rows for FM
+        hist_img_rows.append(percat_img)
+        hist_pix_rows.append(percat_pix)
+
+        # --- global metrics
         gt_labels = np.concatenate(gt_labels_all)
         image_scores = np.concatenate(image_scores_all)
         gt_masks_np = np.concatenate(gt_masks_all)
@@ -1142,10 +1238,18 @@ def run_ucad(
 
         image_auroc = roc_auc_score(gt_labels, image_scores)
         pixel_auroc = calculate_pixel_auroc(gt_masks_np, pixel_scores_np, gt_labels)
+        pixel_aupr_all = calculate_pixel_aupr_all(gt_masks_np, pixel_scores_np)
+
+        # --- FM at current step
+        fm_img = forgetting_measure(hist_img_rows)
+        fm_pix = forgetting_measure(hist_pix_rows)
 
         print(f"\n--- Results after task '{category}' ({len(seen_categories)} seen) ---")
         print(f"  Image AUROC: {image_auroc:.4f}")
         print(f"  Pixel AUROC: {pixel_auroc:.4f}")
+        print(f"  Pixel AUPR (all pixels): {pixel_aupr_all:.4f}")
+        print(f"  FM (Image AUROC): {fm_img:.3f}")
+        print(f"  FM (Pixel AUPR):  {fm_pix:.3f}")
         print("-" * 50)
 
 
@@ -1155,7 +1259,7 @@ def run_ucad(
 
 if __name__ == "__main__":
     DATA_ROOT = "/Users/lenguyenlinhdan/Downloads/FSCIL_TCDS/mvtec2d"      # <-- CHANGE ME
-    SAM_CHECKPOINT = "/Users/lenguyenlinhdan/Downloads/FSCIL_TCDS/UCAD-main/sam_vit_b_01ec64.pth"                  # e.g., "/path/to/sam_vit_b_01ec64.pth" (optional)
+    SAM_CHECKPOINT = "/Users/lenguyenlinhdan/Downloads/FSCIL_TCDS/sam_vit_b_01ec64.pth"                  # e.g., "/path/to/sam_vit_b_01ec64.pth" (optional)
 
     all_categories = [
         'bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather',

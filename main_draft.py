@@ -49,6 +49,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 
 from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
+from sklearn.covariance import LedoitWolf
 
 try:
     # torchvision >= 0.13
@@ -501,6 +502,40 @@ def memory_alignment_loss(curr_feats: torch.Tensor, targets: torch.Tensor) -> to
     nnv = targets.to(curr_feats.device)[d.argmin(dim=1)]
     return F.mse_loss(curr_feats, nnv)
 
+@torch.no_grad()
+def prune_dense_knowledge(ucad_mem: UCADMemory, task: str, keep_ratio: float = 0.8, sample: int = 20000, k: int = 10, metric: str = "cosine"):
+    """
+    Drop the densest (1-keep_ratio) fraction of knowledge vectors based on average kNN distance.
+    """
+    if task not in ucad_mem.mem: return
+    K = ucad_mem.mem[task].knowledge
+    if K.numel() == 0: return
+    Kc = K.detach().cpu()
+    N = Kc.shape[0]
+    idx = torch.randperm(N)[:min(N, sample)]
+    S = Kc[idx]  # [S, D]
+    # pairwise distances within sample (approx density)
+    Dmat = _pairwise_dist(S, S, metric=metric)
+    # ignore self (set large)
+    Dmat[torch.arange(S.size(0)), torch.arange(S.size(0))] = float("inf")
+    vals, _ = torch.topk(Dmat, k=min(k, S.size(0)-1), dim=1, largest=False)
+    dens = vals.mean(dim=1)                        # lower = denser
+    thr = torch.quantile(dens, q=1.0 - keep_ratio) # keep top by distance
+    keep_sample_mask = dens >= thr
+    keep_sample_idx = idx[keep_sample_mask]
+
+    # project to full set by nearest indices (simple: keep these indices and others randomly to meet ratio)
+    keep_mask = torch.zeros(N, dtype=torch.bool)
+    keep_mask[keep_sample_idx] = True
+    need = int(math.ceil(N * keep_ratio)) - keep_mask.sum().item()
+    if need > 0:
+        # add random of remaining
+        rem = torch.nonzero(~keep_mask, as_tuple=False).squeeze(1)
+        extra = rem[torch.randperm(rem.numel())[:need]]
+        keep_mask[extra] = True
+    ucad_mem.mem[task].knowledge = Kc[keep_mask]
+
+
 
 def scl_loss_from_regions(
     patch_tokens: torch.Tensor,      # [B, N, D], L2‑normalized recommended
@@ -649,6 +684,15 @@ class MetaCfg:
     outer_batches_per_step: int = 1
     key_layer: int = 5
 
+@dataclass
+class TaskMemory:
+    keys: torch.Tensor       # [Mk, D]
+    knowledge: torch.Tensor  # [Mn, D]
+    mu: float = 0.0          # calibration mean (image score)
+    sigma: float = 1.0       # calibration std
+    mean_vec: Optional[torch.Tensor] = None     # [D]
+    whitener: Optional[torch.Tensor] = None     # [D, D] inverse sqrt covariance
+
 
 class FastSlowMetaTrainer:
     def __init__(self, model: ViTPromptExtractor, cfg: MetaCfg, segmenter: Optional[StructureSegmenter] = None):
@@ -656,7 +700,7 @@ class FastSlowMetaTrainer:
         self.cfg = cfg
         self.segmenter = segmenter
         self.opt_fast = torch.optim.SGD(list(self.model.fast_params()), lr=cfg.lr_fast)
-        self.opt_slow = torch.optim.Adam(list(self.model.slow_params()), lr=cfg.lr_slow)   # <--- Adam, not AdamW
+        self.opt_slow = torch.optim.AdamW(list(self.model.slow_params()), lr=cfg.lr_slow, weight_decay=1e-4)   # <--- Adam, not AdamW
 
     def inner_update(self, support_batch: Dict[str, Any]) -> float:
         self.model.train()
@@ -759,15 +803,33 @@ class UCADMemory:
 
 # ---- helpers for image score pooling + calibration ----
 
-def _image_score_from_min_d(amap_flat: torch.Tensor, q: float = 0.02, center_quantile: Optional[float] = None) -> torch.Tensor:
-    """amap_flat: [N] vector of per-patch anomaly (min distance)."""
+def _image_score_from_min_d(
+    amap_flat: torch.Tensor,
+    q: float = 0.02,
+    center_quantile: Optional[float] = 0.10,
+) -> torch.Tensor:
+    """
+    Convert a 1D vector of per-patch anomaly distances into one image score.
+
+    Args:
+      amap_flat: 1D tensor [N] of per-patch distances (larger = more anomalous).
+      q: fraction of highest-valued patches to average (e.g., 0.005 = top 0.5%).
+      center_quantile: if set in (0, 0.5), subtract that low-quantile baseline
+                       before top-k (helps tiny/sparse defects stand out).
+
+    Returns:
+      Scalar tensor (image anomaly score).
+    """
     a = amap_flat
+
+    # Optional baseline subtraction (robust to textures & global shifts).
     if center_quantile is not None and 0.0 < center_quantile < 0.5:
-        # subtract a robust baseline (e.g., 10th percentile) to reduce all-high bias
-        k = max(1, int(center_quantile * a.numel()))
-        base = torch.topk(-a, k=k, largest=False).values.max()  # approx low quantile
+        # Use a robust "background" level; clamp for numerical safety.
+        base = torch.quantile(a, torch.tensor(center_quantile, device=a.device))
         a = a - base
-    k = max(1, int(q * a.numel()))
+
+    # Pool top-k patches
+    k = max(1, int(q * a.numel())) if 0.0 < q <= 1.0 else max(1, int(q))
     return torch.topk(a, k=k, largest=True).values.mean()
 
 
@@ -784,12 +846,22 @@ def estimate_image_score_stats(
     extractor.eval().to(DEVICE)
     prompt_bank.load(task, extractor)
     K = ucad_mem.mem[task].knowledge.to(DEVICE)
+    mem = ucad_mem.mem[task]
+
     scores: List[torch.Tensor] = []
     for batch in loader:
         imgs = batch["image"].to(DEVICE)
         feats = extractor.get_final_patches(imgs, use_prompts=True)      # [B, N, D]
         B, N, D = feats.shape
-        dmin = torch.cdist(feats.reshape(-1, D), K).min(dim=1).values.reshape(B, N)  # <-- reshape
+        Z = feats.reshape(-1, D)                                         # [BN, D]
+
+        if mem.whitener is not None and mem.mean_vec is not None:
+            Zw = _apply_whiten(Z, mem.mean_vec, mem.whitener)
+            Kw = _apply_whiten(K, mem.mean_vec, mem.whitener)
+            dmin = torch.cdist(Zw, Kw).min(dim=1).values.reshape(B, N)
+        else:
+            dmin = torch.cdist(Z, K).min(dim=1).values.reshape(B, N)
+
         s = torch.stack([_image_score_from_min_d(dmin[b], q=q, center_quantile=center_quantile) for b in range(B)])
         scores.append(s.cpu())
     s = torch.cat(scores)
@@ -804,40 +876,151 @@ def build_task_memory(
     key_layer: int = 5,
     max_keys: int = 4096,
     max_knowledge: int = 20000,
+    rotations: Tuple[int, ...] = (0,),   # multiples of 90 degrees (0,1,2,3)
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Build per-task memory with optional 90° rotation augmentation.
+    Each r in `rotations` applies torch.rot90(..., k=r, dims=(-2,-1)).
+    """
     extractor.eval().to(DEVICE)
+
     keys_list: List[torch.Tensor] = []
     know_list: List[torch.Tensor] = []
+
     for batch in loader:
-        imgs = batch["image"].to(DEVICE)
-        k = extractor.get_key_patches(imgs, layer_idx=key_layer, use_prompts=False)  # neutral keys
-        z = extractor.get_final_patches(imgs, use_prompts=True)                       # with prompts
-        keys_list.append(k.reshape(-1, k.shape[-1]).detach().cpu())
-        know_list.append(z.reshape(-1, z.shape[-1]).detach().cpu())
-    keys = torch.cat(keys_list, dim=0)
-    knowledge = torch.cat(know_list, dim=0)
-    # coreset selection
-    keys_sel = farthest_point_sampling(keys, min(max_keys, keys.shape[0]))
-    know_sel = kcenter_coreset(knowledge, min(max_knowledge, knowledge.shape[0]))
+        imgs = batch["image"].to(DEVICE)  # [B,3,H,W]
+        for r in rotations:
+            if r % 4 != 0:
+                imgs_r = torch.rot90(imgs, k=r % 4, dims=(-2, -1))
+            else:
+                imgs_r = imgs
+
+            # neutral keys (no prompts) from early layer
+            k = extractor.get_key_patches(imgs_r, layer_idx=key_layer, use_prompts=False)    # [B,N,D]
+            # knowledge (with prompts) from final layer
+            z = extractor.get_final_patches(imgs_r, use_prompts=True)                        # [B,N,D]
+
+            keys_list.append(k.reshape(-1, k.shape[-1]).detach().cpu())
+            know_list.append(z.reshape(-1, z.shape[-1]).detach().cpu())
+
+    keys = torch.cat(keys_list, dim=0) if keys_list else torch.empty(0, 0)
+    knowledge = torch.cat(know_list, dim=0) if know_list else torch.empty(0, 0)
+
+    # coreset after augmentation to keep memory bounded
+    if keys.numel() > 0:
+        keys_sel = farthest_point_sampling(keys, min(max_keys, keys.shape[0]))
+    else:
+        keys_sel = keys
+    if knowledge.numel() > 0:
+        know_sel = kcenter_coreset(knowledge, min(max_knowledge, knowledge.shape[0]))
+    else:
+        know_sel = knowledge
+
     return keys_sel, know_sel
 
 # --- put this small helper near your other utils (once) ---
+# def _resolve_topk(num_items: int, topk: float | int) -> int:
+#     """
+#     If 0 < topk <= 1.0 : treat as ratio of num_items.
+#     If topk >= 1       : treat as absolute count.
+#     Always clamp to [1, num_items].
+#     """
+#     if isinstance(topk, float):
+#         if topk <= 0:
+#             k = 1
+#         elif topk <= 1:
+#             k = int(math.ceil(num_items * topk))
+#         else:
+#             k = int(round(topk))
+#     else:
+#         k = int(topk)
+#     return max(1, min(num_items, k))
+
+def _pooled_image_score(a: torch.Tensor, topk: float|int=0.05, center_quantile: float|None=None,
+                        mode: str = "lse", lse_tau: float = 0.25, min_k: int = 8) -> torch.Tensor:
+    a = a.flatten()
+    if center_quantile is not None and 0.0 < center_quantile < 0.5:
+        base = torch.quantile(a, center_quantile)
+        a = torch.clamp(a - base, min=0)
+    # pick top-k
+    k = int(math.ceil(topk * a.numel())) if isinstance(topk, float) and 0 < topk <= 1 else int(topk)
+    k = max(min_k, min(k, a.numel()))
+    v, _ = torch.topk(a, k=k, largest=True)
+    if mode == "lse":
+        # LogSumExp pooling over top-k (stable “soft-max” pooling)
+        return lse_tau * torch.logsumexp(v / lse_tau, dim=0)
+    else:
+        return v.mean()
+
+def _np_eigh_inv_sqrt(cov: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Return inverse square-root of PSD matrix via eigen-decomposition."""
+    # numerical jitter to ensure PSD
+    cov = cov + np.eye(cov.shape[0], dtype=cov.dtype) * eps
+    w, U = np.linalg.eigh(cov)  # w ascending
+    w = np.clip(w, eps, None)
+    inv_sqrt = (U * (1.0 / np.sqrt(w)) ) @ U.T
+    return inv_sqrt
+
+@torch.no_grad()
+def compute_whitener_from_memory(memory_feats: torch.Tensor, use_ledoit: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    memory_feats: [M, D] (CPU or GPU). Returns (mean_vec[D], whitener[D,D]) on CPU float32.
+    Whitener W maps (x - mean) -> (x - mean) @ W   such that distances are Mahalanobis-like.
+    """
+    if memory_feats.numel() == 0:
+        raise ValueError("Empty memory feats for whitener.")
+    X = memory_feats.detach().cpu().to(torch.float64).numpy()  # [M, D]
+    mu = X.mean(axis=0, dtype=np.float64)                      # [D]
+    Xc = X - mu
+    if use_ledoit:
+        try:
+            lw = LedoitWolf(store_precision=False, assume_centered=True)
+            lw.fit(Xc)                     # estimates covariance on centered data
+            cov = np.asarray(lw.covariance_, dtype=np.float64)  # [D, D]
+        except Exception:
+            cov = (Xc.T @ Xc) / max(1, Xc.shape[0]-1)
+    else:
+        cov = (Xc.T @ Xc) / max(1, Xc.shape[0]-1)
+
+    W = _np_eigh_inv_sqrt(cov, eps=1e-6).astype(np.float32)     # [D, D]
+    mu_t = torch.from_numpy(mu.astype(np.float32))
+    W_t  = torch.from_numpy(W)
+    return mu_t, W_t
+
+def _apply_whiten(z: torch.Tensor, mu: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+    """
+    z: [N, D] on any device; mu/W on CPU or same device.
+    Returns whitened z: (z - mu) @ W
+    """
+    # Move stats to z's device once
+    mu_d = mu.to(z.device, non_blocking=True)
+    W_d  = W.to(z.device, non_blocking=True)
+    return (z - mu_d) @ W_d
+
 def _resolve_topk(num_items: int, topk: float | int) -> int:
-    """
-    If 0 < topk <= 1.0 : treat as ratio of num_items.
-    If topk >= 1       : treat as absolute count.
-    Always clamp to [1, num_items].
-    """
     if isinstance(topk, float):
-        if topk <= 0:
-            k = 1
-        elif topk <= 1:
-            k = int(math.ceil(num_items * topk))
-        else:
-            k = int(round(topk))
+        if topk <= 0: k = 1
+        elif topk <= 1: k = int(math.ceil(num_items * topk))
+        else: k = int(round(topk))
     else:
         k = int(topk)
     return max(1, min(num_items, k))
+
+def _pairwise_dist(X: torch.Tensor, Y: torch.Tensor, metric: str = "euclidean") -> torch.Tensor:
+    """
+    X: [N, D], Y: [M, D] -> [N, M]
+    metric in {"euclidean", "cosine"}
+    """
+    if metric == "euclidean":
+        return torch.cdist(X, Y)
+    elif metric == "cosine":
+        Xn = F.normalize(X, dim=-1)
+        Yn = F.normalize(Y, dim=-1)
+        # cosine distance = 1 - cosine similarity
+        return 1.0 - (Xn @ Yn.T)
+    else:
+        raise ValueError(f"Unknown metric: {metric}")
+
 
 @torch.no_grad()
 def calibrate_task_image_stats(
@@ -846,38 +1029,70 @@ def calibrate_task_image_stats(
     ucad_mem: UCADMemory,
     train_loader: DataLoader,
     task_name: str,
-    key_layer: int = 5,
-    topk: float | int = 0.1,
+    topk: float | int = 0.02,
     sigma_mult: float = 3.0,
-):
+    center_quantile: Optional[float] = None,
+    knn_k: int = 1,
+    robust: bool = False,           # <--- new
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Compute per-task μ/σ (or median/MAD) of image scores on train-good images,
+    matching the same pooling and k-NN settings used at inference.
+    """
     if task_name not in ucad_mem.mem:
         return None, None, None
 
-    image_scores = []
+    extractor.eval().to(DEVICE)
+    prompt_bank.load(task_name, extractor)
+
+    mem = ucad_mem.mem[task_name]
+    K = mem.knowledge.to(DEVICE)
+
+    scores = []
+
     for batch in train_loader:
-        imgs = batch["image"].to(DEVICE)
-
-        prompt_bank.load(task_name, extractor)
-
-        feats = extractor.get_final_patches(imgs, use_prompts=True)      # [B, N, D]
+        imgs = batch["image"].to(DEVICE)         # [B,3,H,W]
+        feats = extractor.get_final_patches(imgs, use_prompts=True)   # [B,N,D]
         B, N, D = feats.shape
-        Z = feats.reshape(B * N, D)                                      # <-- reshape, not view
-        K = ucad_mem.mem[task_name].knowledge.to(Z.device)               # [M, D]
-        d = torch.cdist(Z, K)                                            # [BN, M]
-        min_d = d.min(dim=1).values.reshape(B, N)                        # <-- reshape, not view
+        Z = feats.reshape(B*N, D)
+        d = torch.cdist(Z, K)                    # [BN, M]
 
+        # per-patch distances (k-NN mean or min)
+        if knn_k <= 1:
+            min_d = d.min(dim=1).values.reshape(B, N)
+        else:
+            k_eff = min(knn_k, d.size(1))
+            min_d = torch.topk(d, k=k_eff, largest=False, dim=1).values.mean(dim=1).reshape(B, N)
+
+        # sparse-defect pooling with optional baseline subtraction
         k = _resolve_topk(N, topk)
-        topk_vals = torch.topk(min_d, k=k, dim=1, largest=True).values
-        image_scores.append(topk_vals.mean(dim=1).cpu())
+        pooled = []
+        for b in range(B):
+            a = min_d[b].flatten()
+            if center_quantile is not None and 0.0 < center_quantile < 0.5:
+                # subtract a robust low-quantile baseline
+                q_idx = max(1, int(center_quantile * a.numel()))
+                base = torch.topk(a, k=q_idx, largest=False).values.max()
+                a = a - base
+            pooled.append(torch.topk(a, k=k, largest=True).values.mean())
+        scores.append(torch.stack(pooled).cpu())
 
-    if len(image_scores) == 0:
+    if len(scores) == 0:
         return None, None, None
 
-    scores = torch.cat(image_scores, dim=0).float()
-    mu = scores.mean().item()
-    sigma = scores.std(unbiased=False).item()
-    thr = (mu + sigma_mult * sigma)
-    return mu, sigma, thr
+    s = torch.cat(scores).float()    # [num_train_good]
+
+    if robust:
+        med = s.median().item()
+        mad = (s - med).abs().median().item()
+        sigma = 1.4826 * mad if mad > 0 else max(s.std(unbiased=False).item(), 1e-6)
+        thr = med + sigma_mult * sigma
+        return med, sigma, thr
+    else:
+        mu = s.mean().item()
+        sigma = max(s.std(unbiased=False).item(), 1e-6)
+        thr = mu + sigma_mult * sigma
+        return mu, sigma, thr
 
 
 @torch.no_grad()
@@ -885,11 +1100,10 @@ def select_task_by_imgscore(
     extractor: ViTPromptExtractor,
     prompt_bank: PromptBank,
     ucad_mem: UCADMemory,
-    imgs: torch.Tensor,                 # [B, 3, H, W]
+    imgs: torch.Tensor,
     q: float = 0.02,
     center_quantile: Optional[float] = None,
 ) -> List[str]:
-    """Pick task that yields the lowest *calibrated* image score per image."""
     extractor.eval().to(DEVICE)
     B = imgs.size(0)
     best_scores = [float("inf")] * B
@@ -898,18 +1112,26 @@ def select_task_by_imgscore(
         prompt_bank.load(t, extractor)
         feats = extractor.get_final_patches(imgs, use_prompts=True)   # [B,N,D]
         B_, N, D = feats.shape
-        K = ucad_mem.mem[t].knowledge.to(imgs.device)
-        dmin = torch.cdist(feats.reshape(-1, D), K).min(dim=1).values.view(B_, N)
-        # pool + calibrate
+        Z = feats.reshape(-1, D)
+
+        mem = ucad_mem.mem[t]
+        K = mem.knowledge.to(imgs.device)
+
+        if mem.whitener is not None and mem.mean_vec is not None:
+            Zw = _apply_whiten(Z, mem.mean_vec, mem.whitener)
+            Kw = _apply_whiten(K, mem.mean_vec, mem.whitener)
+            dmin = torch.cdist(Zw, Kw).min(dim=1).values.view(B_, N)
+        else:
+            dmin = torch.cdist(Z, K).min(dim=1).values.view(B_, N)
+
         raw_scores = torch.stack([_image_score_from_min_d(dmin[b], q=q, center_quantile=center_quantile) for b in range(B_)])
-        mu, sigma = ucad_mem.mem[t].mu, ucad_mem.mem[t].sigma
+        mu, sigma = mem.mu, mem.sigma
         s_cal = (raw_scores - mu) / sigma
         for b in range(B_):
             val = float(s_cal[b].item())
             if val < best_scores[b]:
                 best_scores[b] = val
                 best_tasks[b] = t
-    # fallback
     tasks = ucad_mem.tasks()
     return [bt if bt is not None else (tasks[0] if tasks else "") for bt in best_tasks]
 
@@ -964,49 +1186,147 @@ def infer_batch_anomaly(
     ucad_mem: UCADMemory,
     imgs: torch.Tensor,
     key_layer: int = 5,
-    image_topk_ratio: float = 0.02,           # << use ratio, not fixed 100
-    calib_stats: Optional[Dict[str, Dict[str, float]]] = None,  # per-task mu/sigma
+    image_topk: float = 0.02,
+    center_quantile: float | None = None,
+    calib_stats: Optional[Dict[str, Dict[str, float]]] = None,
+    knn_k: int = 1,
+    per_task_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+    # NEW:
+    use_multiscale: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Returns:
+      image_scores: [B] calibrated scores
+      maps: [B, Hp, Wp] pixel anomaly maps (0..1 scaled later by caller)
+    """
     extractor.eval().to(DEVICE)
-    B = imgs.shape[0]
+    B, _, H, W = imgs.shape
+    ps = 16
+    Hp, Wp = H // ps, W // ps
+
+    if per_task_overrides is None:
+        per_task_overrides = {}
+
+    # First pick tasks (keys-based is fine; it’s working well)
     tasks = select_task_by_keys(extractor, prompt_bank, ucad_mem, imgs, key_layer=key_layer)
 
-    image_scores = []
-    maps = []
+    image_scores_out: List[float] = []
+    maps_out: List[torch.Tensor] = []
+
+    # torchvision rotate helper (keeps tensor on device)
+    import torchvision.transforms.functional as TF
+
     for b in range(B):
         t = tasks[b]
-        prompt_bank.load(t, extractor)
+        over = per_task_overrides.get(t, {})
+        tk = int(over.get("knn_k", knn_k))
+        topk_ratio = float(over.get("image_topk", image_topk))
+        cq = float(over.get("center_quantile", center_quantile)) if over.get("center_quantile", None) is not None else center_quantile
+        metric = over.get("metric", "euclidean")  # e.g., set "cosine" for screw
 
-        feats = extractor.get_final_patches(imgs[b:b+1], use_prompts=True)  # [1, N, D]
-        N = feats.shape[1]
-        Z = feats.reshape(-1, feats.shape[-1])                               # [N, D]
-        K = ucad_mem.mem[t].knowledge.to(Z.device)                           # [M, D]
-        d = torch.cdist(Z, K)                                                # [N, M]
-        min_d = d.min(dim=1).values
+        # TTA angles (only for hard classes; default none)
+        tta_angles = over.get("tta_angles", [])
+        if not isinstance(tta_angles, (list, tuple)):
+            tta_angles = []
 
-        # reshape robustly to patch grid
-        ps = 16
-        Hp, Wp = imgs.shape[-2] // ps, imgs.shape[-1] // ps
-        expN = Hp * Wp
-        if N != expN:
-            if N > expN: min_d = min_d[:expN]
-            else:        min_d = F.pad(min_d, (0, expN - N), value=float(min_d.mean()))
-        amap = min_d.reshape(Hp, Wp)
-        
-        raw_score = _aggregate_image_score(amap, ratio=image_topk_ratio)
+        # run one or multiple orientations, aggregate by min (more robust for goods)
+        img_b = imgs[b:b+1]
+        all_img_scores = []
+        all_maps = []
 
-        # Per-task z-score calibration → comparable across tasks
-        if calib_stats is not None and t in calib_stats:
-            mu = calib_stats[t]["mu"]; sigma = calib_stats[t]["sigma"]
-            score = (raw_score - mu) / sigma
-        else:
-            score = raw_score
+        angles_to_run = ([0] + list(tta_angles)) if 0 not in tta_angles else list(tta_angles)
+        for ang in angles_to_run:
+            if ang != 0:
+                x = TF.rotate(img_b, angle=ang, interpolation=InterpolationMode.BILINEAR)
+            else:
+                x = img_b
 
-        image_scores.append(float(score))
-        maps.append(amap.detach().cpu())
+            # ---- MULTI-SCALE MAPS ----
+            # Final layer (prompted) vs knowledge
+            prompt_bank.load(t, extractor)
+            z_final = extractor.get_final_patches(x, use_prompts=True)     # [1, N, D]
+            Nf, Df = z_final.shape[1], z_final.shape[2]
+            Zf = z_final.reshape(-1, Df)
+            Kf = ucad_mem.mem[t].knowledge.to(Zf.device)
 
-    return torch.tensor(image_scores), torch.stack(maps, dim=0)
+            Dfmat = _pairwise_dist(Zf, Kf, metric=metric)                   # [Nf, M]
+            if tk > 1:
+                vals, _ = torch.topk(Dfmat, k=min(tk, Dfmat.shape[1]), dim=1, largest=False)
+                min_final = vals.mean(dim=1)                                # k-NN mean
+            else:
+                min_final = Dfmat.min(dim=1).values
 
+            # Early layer (neutral) vs keys, if enabled
+            if use_multiscale:
+                z_early = extractor.get_key_patches(x, layer_idx=key_layer, use_prompts=False)  # [1, Ne, D]
+                Ne, De = z_early.shape[1], z_early.shape[2]
+                Ze = z_early.reshape(-1, De)
+                Ke = ucad_mem.mem[t].keys.to(Ze.device)
+                Demat = _pairwise_dist(Ze, Ke, metric=metric)               # [Ne, Mk]
+                if tk > 1:
+                    vals_e, _ = torch.topk(Demat, k=min(tk, Demat.shape[1]), dim=1, largest=False)
+                    min_early = vals_e.mean(dim=1)
+                else:
+                    min_early = Demat.min(dim=1).values
+            else:
+                min_early = None
+
+            # Reshape to patch grid (handle any mismatch safely)
+            def _reshape_grid(v: torch.Tensor, N: int) -> torch.Tensor:
+                exp = Hp * Wp
+                out = v
+                if N != exp:
+                    if N > exp:
+                        out = out[:exp]
+                    else:
+                        out = F.pad(out, (0, exp - N), value=float(out.mean()))
+                return out.reshape(Hp, Wp)
+
+            amap_final = _reshape_grid(min_final, Nf)
+            if use_multiscale:
+                amap_early = _reshape_grid(min_early, z_early.shape[1])
+                # combine by elementwise max (keep whichever layer flags a pixel more)
+                amap = torch.maximum(amap_final, amap_early)
+            else:
+                amap = amap_final
+
+            # ---- image score pooling + calibration ----
+            # center-quantile subtraction
+            flat = amap.flatten()
+            if cq is not None and 0.0 < cq < 0.5:
+                k0 = max(1, int(cq * flat.numel()))
+                base = torch.topk(flat, k=k0, largest=False).values.max()
+                flat = flat - base
+
+            k = max(1, int(round(topk_ratio * flat.numel())))
+            raw_score = torch.topk(flat, k=k, largest=True).values.mean()
+
+            if calib_stats is not None and t in calib_stats:
+                mu = calib_stats[t]["mu"]
+                sigma = max(calib_stats[t]["sigma"], 1e-6)
+                img_s = (raw_score - mu) / sigma
+            else:
+                img_s = raw_score
+
+            # rotate map back to original orientation if needed
+            if ang != 0:
+                amap_back = TF.rotate(amap.unsqueeze(0), angle=-ang, interpolation=InterpolationMode.BILINEAR).squeeze(0)
+            else:
+                amap_back = amap
+
+            all_img_scores.append(img_s)
+            all_maps.append(amap_back)
+
+        # Aggregate across TTA by min (robust/forgiving)
+        img_score_b = torch.stack(all_img_scores).min()
+        # For pixel map, min is also OK (keeps lowest anomaly among orientations)
+        # If you prefer more sensitivity, use median; for screw start with min.
+        map_b = torch.stack(all_maps).min(dim=0).values
+
+        image_scores_out.append(float(img_score_b))
+        maps_out.append(map_b.cpu())
+
+    return torch.tensor(image_scores_out), torch.stack(maps_out, dim=0)
 
 # --------------------------------------------------------------------------------------
 # Orchestration: train per task, update PromptBank + UCADMemory, evaluate
@@ -1090,6 +1410,7 @@ def run_ucad(
     scl_coef: float = 0.5,
     # image-level pooling (ratio of top pixels used for image score)
     image_topk_ratio: float = 0.02,
+    center_quantile: Optional[float] = 0.10,
 ):
     print("[init] Building extractor + segmenter…")
     extractor = ViTPromptExtractor(
@@ -1151,7 +1472,7 @@ def run_ucad(
         print(f"[inner] mean loss: {np.mean(inner_losses):.5f} (steps={len(inner_losses)})")
 
         # ----- Outer loop (slow, many steps) -----
-        epochs = 25
+        epochs = 5
         meta.cfg.outer_steps = epochs * max(1, len(query_loader))
         meta.cfg.outer_batches_per_step = 1
         combined_prev_knowledge = ucad_mem.concat_knowledge()
@@ -1165,13 +1486,53 @@ def run_ucad(
         prompt_bank.save(category, extractor)
 
         # ----- Build per-task memory (keys/knowledge, with k-center/fps) -----
+        ROTATE_TASKS = {"screw", "cable", "zipper", "metal_nut"}  # extend if you like
+        rotations = (0,1,2,3) if category in ROTATE_TASKS else (0,)
+
         keys, knowledge = build_task_memory(
-            extractor, train_loader, key_layer=meta.cfg.key_layer, max_keys=max_keys, max_knowledge=max_knowledge
+            extractor, train_loader,
+            key_layer=meta.cfg.key_layer,
+            max_keys=max_keys,
+            max_knowledge=max_knowledge,
+            rotations=rotations,
         )
+
         ucad_mem.add(category, keys, knowledge)
-        print(f"[memory] {category}: keys={keys.shape[0]} | knowledge={knowledge.shape[0]}")
+        # if category == "screw":
+        #     prune_dense_knowledge(ucad_mem, "screw", keep_ratio=0.8, sample=15000, k=10, metric="cosine")
+        print(f"[memory] {category}: keys={ucad_mem.mem[category].keys.shape[0]} | knowledge={ucad_mem.mem[category].knowledge.shape[0]}")
+
+
+        # ----- Compute per-task whitener (from knowledge) -----
+        try:
+            mean_vec, W = compute_whitener_from_memory(knowledge, use_ledoit=True)
+            ucad_mem.mem[category].mean_vec = mean_vec   # CPU tensors
+            ucad_mem.mem[category].whitener = W
+            print(f"[whiten] {category}: mean[D]={mean_vec.numel()} W[D,D]={W.shape}")
+        except Exception as e:
+            print(f"[whiten] {category}: FAILED to compute whitener ({e}); falling back to L2.")
+
 
         # ----- Per-task calibration of image scores -----
+        # sensible defaults
+        knn_k_default = 1
+        center_quantile = 0.05
+        image_topk_ratio = 0.02
+
+        # Per-task overrides (augment screw)
+        overrides = {
+            "screw":      {
+                "knn_k": 7,                    # more averaging
+                "image_topk": 0.01,            # focus on sparser hot pixels
+                "center_quantile": 0.10,       # subtract more baseline
+                "metric": "cosine",            # robust to highlights
+                "tta_angles": [0, 90, 180, 270],
+            },
+            "metal_nut":  {"knn_k": 3, "metric": "cosine"},
+            "cable":      {"knn_k": 3},
+            "zipper":     {"knn_k": 3},
+        }
+
         mu, sigma, thr = calibrate_task_image_stats(
             extractor=extractor,
             prompt_bank=prompt_bank,
@@ -1180,7 +1541,12 @@ def run_ucad(
             task_name=category,
             topk=image_topk_ratio,
             sigma_mult=3.0,
+            center_quantile=center_quantile,   # if you’re using it
+            knn_k=knn_k_default,               # see below
+            robust=True,                       # <--- robust stats
         )
+
+
         if mu is not None:
             sigma = max(float(sigma), 1e-6)
             calib_stats[category] = {"mu": float(mu), "sigma": sigma, "thr": float(thr)}
@@ -1227,12 +1593,26 @@ def run_ucad(
             route_total += len(paths)
 
             # --- actual inference (still uses keys-based selection inside) ---
+            # hard-class overrides
+            # overrides = {
+            #     "screw":      {"knn_k": 5, "image_topk": 0.01, "center_quantile": 0.10},
+            #     "cable":      {"knn_k": 3},
+            #     "zipper":     {"knn_k": 3},
+            #     "metal_nut":  {"knn_k": 3},
+            # }
+
             img_scores, maps = infer_batch_anomaly(
                 extractor, prompt_bank, ucad_mem, imgs,
                 key_layer=meta.cfg.key_layer,
-                image_topk_ratio=image_topk_ratio,
+                image_topk=image_topk_ratio,
+                center_quantile=center_quantile,
                 calib_stats=calib_stats,
+                knn_k=knn_k_default,
+                per_task_overrides=None,
+                use_multiscale=True,
             )
+
+
 
             # Upsample and normalize maps
             Ht, Wt = imgs.shape[-2:]
@@ -1319,7 +1699,7 @@ def run_ucad(
 
 if __name__ == "__main__":
     DATA_ROOT = "/Users/lenguyenlinhdan/Downloads/FSCIL_TCDS/mvtec2d"      # <-- CHANGE ME
-    SAM_CHECKPOINT = "/Users/lenguyenlinhdan/Downloads/FSCIL_TCDS/UCAD-main/sam_vit_b_01ec64.pth"                  # e.g., "/path/to/sam_vit_b_01ec64.pth" (optional)
+    SAM_CHECKPOINT = "/Users/lenguyenlinhdan/Downloads/FSCIL_TCDS/sam_vit_b_01ec64.pth"                  # e.g., "/path/to/sam_vit_b_01ec64.pth" (optional)
 
     all_categories = [
         'bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather',
@@ -1341,5 +1721,7 @@ if __name__ == "__main__":
         align_coef=0.5,
         scl_coef=0.1,
         image_topk_ratio=0.02,          # top 2% pooling for image score
-        # center_quantile=None,        # set to e.g. 0.10 to subtract 10th percentile before pooling
+        center_quantile=None,        # set to e.g. 0.10 to subtract 10th percentile before pooling
     )
+
+
