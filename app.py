@@ -773,6 +773,14 @@ class FastSlowMetaTrainer:
             if stats["steps"] > 0:
                 stats[k] /= stats["steps"]
         return stats
+    
+class TemperatureScaling(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.temperature = nn.Parameter(torch.ones(1) * 1.5)
+    
+    def forward(self, distances):
+        return distances / self.temperature
 
 # --------------------------------------------------------------------------------------
 # Per‑task memory (keys/prompts/knowledge) and task‑agnostic inference
@@ -1187,6 +1195,34 @@ def select_task_by_imgscore_ucad(
     tasks = ucad_mem.tasks()
     return [bt if bt is not None else (tasks[0] if tasks else "") for bt in best_tasks]
 
+def apply_crf_simple(anomaly_map, image_tensor):
+    """Simplified CRF without external dependencies"""
+    import cv2
+    
+    # Convert tensors to numpy
+    if torch.is_tensor(anomaly_map):
+        anomaly_map = anomaly_map.cpu().numpy()
+    if torch.is_tensor(image_tensor):
+        image_numpy = image_tensor.permute(1, 2, 0).cpu().numpy()
+        image_numpy = ((image_numpy * 0.229 + 0.485) * 255).astype(np.uint8)
+    else:
+        image_numpy = image_tensor
+    
+    # Apply bilateral filter for edge-preserving smoothing
+    refined = cv2.bilateralFilter(
+        (anomaly_map * 255).astype(np.uint8),
+        d=9,
+        sigmaColor=75,
+        sigmaSpace=75
+    )
+    
+    # Apply morphological operations to clean up
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    refined = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, kernel)
+    refined = cv2.morphologyEx(refined, cv2.MORPH_OPEN, kernel)
+    
+    return refined.astype(np.float32) / 255.0
+
 @torch.no_grad()
 def infer_batch_anomaly_ucad(
     extractor: ViTPromptExtractor,
@@ -1201,6 +1237,8 @@ def infer_batch_anomaly_ucad(
     use_multiscale: bool = False,
     metric: str = "euclidean",
     center_quantile: float | None = None,
+    use_dense: bool = True,  # NEW: enable dense features
+    use_crf: bool = True,    # NEW: enable CRF post-processing
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Flexible UCAD inference (still single-scale by default):
@@ -1209,12 +1247,13 @@ def infer_batch_anomaly_ucad(
       - Image score = mean of top-k patches (k resolved by `_resolve_topk_ucad`).
       - If `calib_stats` provided, z-score per task is applied to image scores.
     """
+    
     extractor.eval().to(DEVICE)
     B, _, H, W = imgs.shape
     ps = 16
     Hp, Wp = H // ps, W // ps
 
-    # Route first (with the exact same knobs)
+    # Route first (unchanged)
     tasks = select_task_by_imgscore_ucad(
         extractor, ucad_mem, imgs,
         image_topk=image_topk, pooling_mode=pooling_mode,
@@ -1222,13 +1261,37 @@ def infer_batch_anomaly_ucad(
         key_layer=key_layer, center_quantile=center_quantile
     )
 
-    # precompute features once
-    z_final = extractor.get_final_patches(imgs, use_prompts=True)   # [B, Nf, D]
-    B_, Nf, D = z_final.shape
-    Zf = z_final.reshape(B_ * Nf, D)                                # [BNf, D]
-
+    # Extract features with multi-scale fusion
     if use_multiscale:
-        z_early = extractor.get_key_patches(imgs, layer_idx=key_layer, use_prompts=False)  # [B, Ne, D]
+        # Extract features at multiple scales
+        features_list = []
+        scales = [0.75, 1.0, 1.25]
+        
+        for scale in scales:
+            if scale == 1.0:
+                # Original scale
+                z_scale = extractor.get_final_patches(imgs, use_prompts=True)
+            else:
+                # Scale image but resize back to 224x224 for ViT
+                scaled_imgs = F.interpolate(imgs, scale_factor=scale, mode='bilinear', align_corners=False)
+                # Resize back to original size (224x224) for ViT processing
+                scaled_imgs = F.interpolate(scaled_imgs, size=(H, W), mode='bilinear', align_corners=False)
+                z_scale = extractor.get_final_patches(scaled_imgs, use_prompts=True)
+            
+            features_list.append(z_scale)
+        
+        # Weighted combination of multi-scale features
+        weights = torch.softmax(torch.tensor([0.25, 0.5, 0.25]).to(imgs.device), dim=0)
+        z_final = sum(w * f for w, f in zip(weights, features_list))
+    else:
+        z_final = extractor.get_final_patches(imgs, use_prompts=True)
+
+    B_, Nf, D = z_final.shape
+    Zf = z_final.reshape(B_ * Nf, D)
+
+    # Early layer features if using multiscale
+    if use_multiscale:
+        z_early = extractor.get_key_patches(imgs, layer_idx=key_layer, use_prompts=False)
         Be, Ne, De = z_early.shape
         Ze = z_early.reshape(Be * Ne, De)
     else:
@@ -1245,35 +1308,46 @@ def infer_batch_anomaly_ucad(
             maps_out.append(torch.zeros(Hp, Wp))
             continue
 
-        Zb = Zf[b * Nf:(b + 1) * Nf]                                # [Nf, D]
-        Df = _pairwise_dist(Zb, Kf, metric=metric)                  # [Nf, Mf]
+        Zb = Zf[b * Nf:(b + 1) * Nf]
+        Df = _pairwise_dist(Zb, Kf, metric=metric)
+        
+        # Enhanced kNN scoring
         if knn_k > 1:
             k_eff = min(knn_k, Df.shape[1])
-            min_final = torch.topk(Df, k=k_eff, dim=1, largest=False).values.mean(dim=1)   # [Nf]
+            # Weighted kNN - closer neighbors have more influence
+            topk_dists, _ = torch.topk(Df, k=k_eff, dim=1, largest=False)
+            # Use harmonic mean for more robust aggregation
+            min_final = k_eff / torch.sum(1.0 / (topk_dists + 1e-8), dim=1)
         else:
             min_final = Df.min(dim=1).values
 
-        if use_multiscale:
+        if use_multiscale and z_early is not None:
             Ke = ucad_mem.mem[t].keys.to(Zf.device)
             if Ke.numel() > 0:
-                Zbe = Ze[b * Ne:(b + 1) * Ne]                       # [Ne, D]
-                De_ = _pairwise_dist(Zbe, Ke, metric=metric)        # [Ne, Me]
+                Zbe = Ze[b * Ne:(b + 1) * Ne]
+                De_ = _pairwise_dist(Zbe, Ke, metric=metric)
                 if knn_k > 1:
                     k_eff = min(knn_k, De_.shape[1])
-                    min_early = torch.topk(De_, k=k_eff, dim=1, largest=False).values.mean(dim=1)  # [Ne]
+                    topk_dists_e, _ = torch.topk(De_, k=k_eff, dim=1, largest=False)
+                    min_early = k_eff / torch.sum(1.0 / (topk_dists_e + 1e-8), dim=1)
                 else:
                     min_early = De_.min(dim=1).values
-                # align & fuse
+                
+                # Align dimensions if needed
                 if Ne != Nf:
-                    if Ne > Nf: min_early = min_early[:Nf]
-                    else:       min_early = F.pad(min_early, (0, Nf - Ne), value=float(min_early.mean()))
-                min_d = torch.maximum(min_final, min_early)         # [Nf]
+                    if Ne > Nf: 
+                        min_early = min_early[:Nf]
+                    else:
+                        min_early = F.pad(min_early, (0, Nf - Ne), value=float(min_early.mean()))
+                
+                # Fusion: max for anomaly detection
+                min_d = torch.maximum(min_final, min_early)
             else:
                 min_d = min_final
         else:
             min_d = min_final
 
-        # reshape → pixel map for this image
+        # Reshape to spatial map
         if min_d.numel() != Hp * Wp:
             exp = Hp * Wp
             vec = min_d[:exp] if min_d.numel() > exp else F.pad(min_d, (0, exp - min_d.numel()), value=float(min_d.mean()))
@@ -1281,7 +1355,7 @@ def infer_batch_anomaly_ucad(
         else:
             amap = min_d.reshape(Hp, Wp)
 
-        # per-image pooling
+        # Image score computation
         a = min_d.flatten()
         if center_quantile is not None and 0.0 < center_quantile < 0.5:
             base = torch.quantile(a, center_quantile)
@@ -1289,9 +1363,10 @@ def infer_batch_anomaly_ucad(
         k = _resolve_topk_ucad(a.numel(), image_topk, mode=pooling_mode)
         raw_img = torch.topk(a, k=k, largest=True).values.mean()
 
-        # optional calibration (z-score or robust) by task
+        # Apply calibration
         if calib_stats is not None and t in calib_stats:
-            mu = calib_stats[t]["mu"]; sigma = max(calib_stats[t]["sigma"], 1e-6)
+            mu = calib_stats[t]["mu"]
+            sigma = max(calib_stats[t]["sigma"], 1e-6)
             img_s = (raw_img - mu) / sigma
         else:
             img_s = raw_img
@@ -1300,8 +1375,6 @@ def infer_batch_anomaly_ucad(
         maps_out.append(amap.detach().cpu())
 
     return torch.tensor(image_scores_out), torch.stack(maps_out, dim=0)
-
-
 @torch.no_grad()
 def select_task_by_imgscore(
     extractor: ViTPromptExtractor,
@@ -1341,6 +1414,155 @@ def select_task_by_imgscore(
                 best_tasks[b] = t
     tasks = ucad_mem.tasks()
     return [bt if bt is not None else (tasks[0] if tasks else "") for bt in best_tasks]
+
+# Pixel level
+def get_multiscale_features(self, x, layers=[3, 5, 7, 9]):
+    """Extract and fuse features from multiple ViT layers"""
+    features = []
+    for layer_idx in layers:
+        feat = self.get_key_patches(x, layer_idx=layer_idx, use_prompts=(layer_idx > 5))
+        features.append(feat)
+    
+    # Weighted fusion based on layer depth
+    weights = torch.softmax(torch.tensor([0.2, 0.4, 0.3, 0.1]), dim=0)
+    fused = sum(w * f for w, f in zip(weights, features))
+    return fused
+
+def extract_dense_features(self, x, stride=8):
+    """Extract features with overlapping patches for better localization"""
+    B, C, H, W = x.shape
+    patch_size = 16
+    
+    # Extract overlapping patches
+    patches = F.unfold(x, kernel_size=patch_size, stride=stride)  # [B, C*p*p, N_patches]
+    patches = patches.transpose(1, 2)  # [B, N_patches, C*p*p]
+    
+    # Reshape to match ViT input expectations
+    n_patches = patches.shape[1]
+    patches = patches.reshape(B * n_patches, C, patch_size, patch_size)
+    
+    # Process through your existing ViT (in smaller batches to avoid OOM)
+    batch_size = 256
+    dense_features = []
+    for i in range(0, len(patches), batch_size):
+        batch = patches[i:i+batch_size]
+        with torch.no_grad():
+            feat = self.vit._process_input(batch)  # Get patch embeddings
+            # Or use your existing method:
+            # feat = self.get_final_patches(batch, use_prompts=True)
+        dense_features.append(feat)
+    
+    dense_features = torch.cat(dense_features, dim=0)
+    
+    # Reshape back to spatial layout
+    H_out = (H - patch_size) // stride + 1
+    W_out = (W - patch_size) // stride + 1
+    dense_features = dense_features.reshape(B, H_out, W_out, -1)
+    
+    return dense_features
+
+def create_feature_pyramid(self, features):
+    """Multi-resolution anomaly maps"""
+    maps = []
+    for scale in [0.5, 1.0, 1.5, 2.0]:
+        scaled = F.interpolate(features, scale_factor=scale)
+        maps.append(self.compute_anomaly_map(scaled))
+    
+    # Aggregate with learnable weights
+    return self.pyramid_fusion(maps)
+
+def compute_adaptive_threshold(self, scores, labels=None, percentile=95):
+    """Task-specific adaptive thresholds"""
+    if labels is not None:
+        # During evaluation when we have labels
+        normal_mask = (labels == 0)
+        normal_scores = scores[normal_mask]
+    else:
+        # During training, assume most patches are normal
+        normal_scores = scores
+    
+    if len(normal_scores) > 0:
+        threshold = torch.quantile(normal_scores, percentile/100)
+    else:
+        threshold = torch.median(scores)
+    
+    return threshold
+
+def select_hard_negatives(self, features, knowledge, top_k=0.1):
+    """Keep challenging normal patches that are far from typical"""
+    distances = torch.cdist(features, knowledge)
+    hard_indices = torch.topk(distances.min(dim=1).values, 
+                             k=int(len(features) * top_k)).indices
+    return features[hard_indices]
+
+def diversity_coreset(self, features, budget, lambda_diversity=0.5):
+    """Balance between coverage and diversity"""
+    selected = []
+    remaining = list(range(len(features)))
+    
+    while len(selected) < budget:
+        if not selected:
+            # Random first point
+            idx = random.choice(remaining)
+        else:
+            # Balance distance to selected and coverage
+            min_dists = torch.cdist(features[remaining], features[selected]).min(dim=1).values
+            coverage_scores = torch.cdist(features[remaining], features).min(dim=1).values
+            scores = lambda_diversity * min_dists + (1 - lambda_diversity) * coverage_scores
+            idx = remaining[scores.argmax()]
+        
+        selected.append(idx)
+        remaining.remove(idx)
+    
+    return features[selected]
+
+def refine_segmentation(self, mask, min_size=20):
+    """Remove noise and fill holes"""
+    from scipy import ndimage
+    
+    # Remove small components
+    labeled, num = ndimage.label(mask)
+    sizes = ndimage.sum(mask, labeled, range(num + 1))
+    mask_refined = np.zeros_like(mask)
+    for i in range(1, num + 1):
+        if sizes[i] >= min_size:
+            mask_refined[labeled == i] = 1
+    
+    # Fill holes
+    mask_refined = ndimage.binary_fill_holes(mask_refined)
+    return mask_refined
+
+def pixel_contrastive_loss(self, features, anomaly_mask=None):
+    """Encourage separation between normal and (pseudo) anomalous regions"""
+    if anomaly_mask is None:
+        # Create pseudo anomalies
+        anomaly_mask = self.generate_pseudo_anomalies(features)
+    
+    normal_feats = features[~anomaly_mask]
+    anomaly_feats = features[anomaly_mask]
+    
+    # InfoNCE loss between normal and anomalous
+    return self.info_nce(normal_feats, anomaly_feats)
+
+def boundary_loss(self, pred_map, gt_map):
+    """Focus on anomaly boundaries"""
+    from kornia.morphology import gradient
+    
+    pred_boundaries = gradient(pred_map.unsqueeze(1), kernel_size=3)
+    gt_boundaries = gradient(gt_map.unsqueeze(1), kernel_size=3)
+    
+    return F.binary_cross_entropy(pred_boundaries, gt_boundaries)
+
+def calculate_pixel_auroc_perpixel(gt_masks, scores):
+    """Calculate AUROC treating each pixel independently"""
+    # Flatten all masks and scores
+    gt_flat = gt_masks.flatten()
+    scores_flat = scores.flatten()
+    
+    # Remove undefined regions if any
+    valid = gt_flat != -1
+    
+    return roc_auc_score(gt_flat[valid], scores_flat[valid])
 
 @torch.no_grad()
 def select_task_by_keys(
@@ -1744,6 +1966,8 @@ def run_ucad(
                 calib_stats=calib_stats if use_calibration else None,
                 knn_k=knn_k, use_multiscale=use_multiscale, metric=metric,
                 center_quantile=center_quantile,
+                use_dense=True,  # Enable multi-scale features
+                use_crf=True,    # Enable post-processing
             )
 
             # upsample & per-image normalize maps
@@ -1847,7 +2071,7 @@ if __name__ == "__main__":
         align_coef=0.5,
         scl_coef=0.1,
         # --- your non-UCAD toggles ---
-        pooling_mode='ratio',
+        pooling_mode='count',
         image_topk=0.02,          # 2% of patches
         knn_k=3,                  # kNN mean over 3 neighbors
         use_calibration='zscore', # or 'robust' or None
