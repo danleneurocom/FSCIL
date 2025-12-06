@@ -1,0 +1,678 @@
+================================================================================
+STARTING VERSION 1: WITHOUT FAST/SLOW PROMPTS
+================================================================================
+
+============================================================
+ABLATION STUDY - VERSION 1
+Configuration: WITHOUT Fast/Slow Prompts (using simple single prompt)
+              + WITH Meta-Learning
+============================================================
+
+Sanity check passed: forward works on mps
+[device] Using: mps
+
+=== Task 1/15: bottle ===
+[training] Version 1 - loss_q=0.26680
+[memory] bottle: keys=4096, knowledge=20000
+Testing Version 1: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 11/11 [00:02<00:00,  4.08it/s]
+
+--- Results Version 1 after 'bottle' ---
+  Image AUROC: 0.929365
+  Pixel AUROC: 0.901490
+  Pixel AUPR:  0.378495
+  FM (Image):  0.000000e+00
+  FM (Pixel):  0.000000e+00
+--------------------------------------------------
+
+=== Task 2/15: cable ===
+[training] Version 1 - loss_q=0.25042
+[memory] cable: keys=4096, knowledge=20000
+Testing Version 1: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 30/30 [00:08<00:00,  3.37it/s]
+
+--- Results Version 1 after 'cable' ---
+  Image AUROC: 0.745740
+  Pixel AUROC: 0.765799
+  Pixel AUPR:  0.114096
+  FM (Image):  1.587302e-03
+  FM (Pixel):  9.227508e-02
+--------------------------------------------------
+
+=== Task 3/15: capsule ===
+[training] Version 1 - loss_q=0.21894
+[memory] capsule: keys=4096, knowledge=20000
+Testing Version 1: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 46/46 [00:14<00:00,  3.14it/s]
+
+--- Results Version 1 after 'capsule' ---
+  Image AUROC: 0.564994
+  Pixel AUROC: 0.825427
+  Pixel AUPR:  0.092601
+  FM (Image):  8.214494e-03
+  FM (Pixel):  9.536231e-02
+--------------------------------------------------
+
+=== Task 4/15: carpet ===
+[training] Version 1 - loss_q=0.11364
+[memory] carpet: keys=4096, knowledge=20000
+Testing Version 1: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 61/61 [00:20<00:00,  2.93it/s]
+
+--- Results Version 1 after 'carpet' ---
+  Image AUROC: 0.545930
+  Pixel AUROC: 0.808377
+  Pixel AUPR:  0.076806
+  FM (Image):  1.566582e-02
+  FM (Pixel):  9.310484e-02
+--------------------------------------------------
+
+=== Task 5/15: grid ===
+[training] Version 1 - loss_q=0.09281
+[memory] grid: keys=4096, knowledge=20000
+Testing Version 1: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 70/70 [00:24<00:00,  2.89it/s]
+
+--- Results Version 1 after 'grid' ---
+  Image AUROC: 0.537837
+  Pixel AUROC: 0.790587
+  Pixel AUPR:  0.059217
+  FM (Image):  1.804950e-02
+  FM (Pixel):  9.085386e-02
+--------------------------------------------------
+
+=== Task 6/15: hazelnut ===
+[training] Version 1 - loss_q=0.11971
+[memory] hazelnut: keys=4096, knowledge=20000
+Testing Version 1: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 84/84 [00:31<00:00,  2.69it/s]
+
+--- Results Version 1 after 'hazelnut' ---
+  Image AUROC: 0.531546
+  Pixel AUROC: 0.779980
+  Pixel AUPR:  0.053249
+  FM (Image):  2.023318e-02
+  FM (Pixel):  8.824764e-02
+--------------------------------------------------
+
+=== Task 7/15: leather ===
+[training] Version 1 - loss_q=0.07065
+[memory] leather: keys=4096, knowledge=20000
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 100/100 [00:38<00:00,  2.59it/s]
+
+--- Results Version 1 after 'leather' ---
+  Image AUROC: 0.564733
+  Pixel AUROC: 0.770117
+  Pixel AUPR:  0.047395
+  FM (Image):  2.323770e-02
+  FM (Pixel):  8.514445e-02
+--------------------------------------------------
+
+=== Task 8/15: metal_nut ===
+[training] Version 1 - loss_q=0.07368
+[memory] metal_nut: keys=4096, knowledge=20000
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 114/114 [00:46<00:00,  2.46it/s]
+
+--- Results Version 1 after 'metal_nut' ---
+  Image AUROC: 0.543603
+  Pixel AUROC: 0.768168
+  Pixel AUPR:  0.073404
+  FM (Image):  3.271830e-02
+  FM (Pixel):  8.196820e-02
+--------------------------------------------------
+
+=== Task 9/15: pill ===
+[training] Version 1 - loss_q=0.06600
+[memory] pill: keys=4096, knowledge=20000
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 135/135 [00:57<00:00,  2.35it/s]
+
+--- Results Version 1 after 'pill' ---
+  Image AUROC: 0.493672
+  Pixel AUROC: 0.782586
+  Pixel AUPR:  0.082493
+  FM (Image):  3.901831e-02
+  FM (Pixel):  7.881467e-02
+--------------------------------------------------
+
+=== Task 10/15: screw ===
+[training] Version 1 - loss_q=0.06196
+[memory] screw: keys=4096, knowledge=20000
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 155/155 [01:07<00:00,  2.29it/s]
+
+--- Results Version 1 after 'screw' ---
+  Image AUROC: 0.496216
+  Pixel AUROC: 0.796949
+  Pixel AUPR:  0.078040
+  FM (Image):  4.321593e-02
+  FM (Pixel):  7.592985e-02
+--------------------------------------------------
+
+=== Task 11/15: tile ===
+[training] Version 1 - loss_q=0.04670
+[memory] tile: keys=4096, knowledge=20000
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 170/170 [01:16<00:00,  2.22it/s]
+
+--- Results Version 1 after 'tile' ---
+  Image AUROC: 0.521738
+  Pixel AUROC: 0.803458
+  Pixel AUPR:  0.094673
+  FM (Image):  4.761325e-02
+  FM (Pixel):  7.267734e-02
+--------------------------------------------------
+
+=== Task 12/15: toothbrush ===
+[training] Version 1 - loss_q=0.06020
+[memory] toothbrush: keys=4096, knowledge=11700
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 175/175 [01:26<00:00,  2.03it/s]
+
+--- Results Version 1 after 'toothbrush' ---
+  Image AUROC: 0.525467
+  Pixel AUROC: 0.807745
+  Pixel AUPR:  0.096081
+  FM (Image):  5.104255e-02
+  FM (Pixel):  6.962984e-02
+--------------------------------------------------
+
+=== Task 13/15: transistor ===
+[training] Version 1 - loss_q=0.05329
+[memory] transistor: keys=4096, knowledge=20000
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 187/187 [01:37<00:00,  1.93it/s]
+
+--- Results Version 1 after 'transistor' ---
+  Image AUROC: 0.571124
+  Pixel AUROC: 0.791344
+  Pixel AUPR:  0.095154
+  FM (Image):  5.335619e-02
+  FM (Pixel):  6.687331e-02
+--------------------------------------------------
+
+=== Task 14/15: wood ===
+[training] Version 1 - loss_q=0.03055
+[memory] wood: keys=4096, knowledge=20000
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 197/197 [01:45<00:00,  1.87it/s]
+
+--- Results Version 1 after 'wood' ---
+  Image AUROC: 0.581557
+  Pixel AUROC: 0.790752
+  Pixel AUPR:  0.095247
+  FM (Image):  5.491290e-02
+  FM (Pixel):  6.443419e-02
+--------------------------------------------------
+
+=== Task 15/15: zipper ===
+[training] Version 1 - loss_q=0.05740
+[memory] zipper: keys=4096, knowledge=20000
+Testing Version 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 216/216 [01:57<00:00,  1.84it/s]
+
+--- Results Version 1 after 'zipper' ---
+  Image AUROC: 0.565279
+  Pixel AUROC: 0.792709
+  Pixel AUPR:  0.095368
+  FM (Image):  5.638428e-02
+  FM (Pixel):  6.219674e-02
+--------------------------------------------------
+
+================================================================================
+STARTING VERSION 2: WITHOUT META-LEARNING
+================================================================================
+
+============================================================
+ABLATION STUDY - VERSION 2
+Configuration: WITH Fast/Slow Prompts
+              + WITHOUT Meta-Learning (standard training)
+============================================================
+
+Sanity check passed: forward works on mps
+
+=== Task 1/15: bottle ===
+[training] Version 2 - loss_compact=0.21945, loss_align=0.00000
+[memory] bottle: keys=4096, knowledge=20000
+Testing Version 2: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 11/11 [00:03<00:00,  2.91it/s]
+
+--- Results Version 2 after 'bottle' ---
+  Image AUROC: 0.961905
+  Pixel AUROC: 0.871267
+  Pixel AUPR:  0.230729
+  FM (Image):  0.000000e+00
+  FM (Pixel):  0.000000e+00
+--------------------------------------------------
+
+=== Task 2/15: cable ===
+[training] Version 2 - loss_compact=0.07913, loss_align=0.10893
+[memory] cable: keys=4096, knowledge=20000
+Testing Version 2: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 30/30 [00:11<00:00,  2.55it/s]
+
+--- Results Version 2 after 'cable' ---
+  Image AUROC: 0.801323
+  Pixel AUROC: 0.820355
+  Pixel AUPR:  0.128011
+  FM (Image):  -1.666667e-02
+  FM (Pixel):  7.277330e-02
+--------------------------------------------------
+
+=== Task 3/15: capsule ===
+[training] Version 2 - loss_compact=0.04578, loss_align=0.05842
+[memory] capsule: keys=4096, knowledge=20000
+Testing Version 2: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 46/46 [00:19<00:00,  2.39it/s]
+
+--- Results Version 2 after 'capsule' ---
+  Image AUROC: 0.550293
+  Pixel AUROC: 0.783735
+  Pixel AUPR:  0.079087
+  FM (Image):  9.492992e-02
+  FM (Pixel):  7.926998e-02
+--------------------------------------------------
+
+=== Task 4/15: carpet ===
+[training] Version 2 - loss_compact=0.01313, loss_align=0.03377
+[memory] carpet: keys=4096, knowledge=20000
+Testing Version 2: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 61/61 [00:27<00:00,  2.21it/s]
+
+--- Results Version 2 after 'carpet' ---
+  Image AUROC: 0.514285
+  Pixel AUROC: 0.824467
+  Pixel AUPR:  0.081706
+  FM (Image):  9.356544e-02
+  FM (Pixel):  7.404192e-02
+--------------------------------------------------
+
+=== Task 5/15: grid ===
+[training] Version 2 - loss_compact=0.01103, loss_align=0.02136
+[memory] grid: keys=4096, knowledge=20000
+Testing Version 2: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 70/70 [00:35<00:00,  1.95it/s]
+
+--- Results Version 2 after 'grid' ---
+  Image AUROC: 0.526715
+  Pixel AUROC: 0.811011
+  Pixel AUPR:  0.069738
+  FM (Image):  8.529388e-02
+  FM (Pixel):  6.709545e-02
+--------------------------------------------------
+
+=== Task 6/15: hazelnut ===
+[training] Version 2 - loss_compact=0.01203, loss_align=0.02091
+[memory] hazelnut: keys=4096, knowledge=20000
+Testing Version 2: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 84/84 [00:46<00:00,  1.82it/s]
+
+--- Results Version 2 after 'hazelnut' ---
+  Image AUROC: 0.532138
+  Pixel AUROC: 0.710795
+  Pixel AUPR:  0.050157
+  FM (Image):  1.050925e-01
+  FM (Pixel):  6.590331e-02
+--------------------------------------------------
+
+=== Task 7/15: leather ===
+[training] Version 2 - loss_compact=0.00588, loss_align=0.01313
+[memory] leather: keys=4096, knowledge=20000
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 100/100 [00:56<00:00,  1.76it/s]
+
+--- Results Version 2 after 'leather' ---
+  Image AUROC: 0.539895
+  Pixel AUROC: 0.742708
+  Pixel AUPR:  0.049263
+  FM (Image):  1.140301e-01
+  FM (Pixel):  6.365043e-02
+--------------------------------------------------
+
+=== Task 8/15: metal_nut ===
+[training] Version 2 - loss_compact=0.01090, loss_align=0.01627
+[memory] metal_nut: keys=4096, knowledge=20000
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 114/114 [01:06<00:00,  1.71it/s]
+
+--- Results Version 2 after 'metal_nut' ---
+  Image AUROC: 0.538574
+  Pixel AUROC: 0.817154
+  Pixel AUPR:  0.111593
+  FM (Image):  1.129677e-01
+  FM (Pixel):  6.088399e-02
+--------------------------------------------------
+
+=== Task 9/15: pill ===
+[training] Version 2 - loss_compact=0.00823, loss_align=0.01218
+[memory] pill: keys=4096, knowledge=20000
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 135/135 [01:20<00:00,  1.67it/s]
+
+--- Results Version 2 after 'pill' ---
+  Image AUROC: 0.493820
+  Pixel AUROC: 0.826948
+  Pixel AUPR:  0.129012
+  FM (Image):  1.117276e-01
+  FM (Pixel):  5.846874e-02
+--------------------------------------------------
+
+=== Task 10/15: screw ===
+[training] Version 2 - loss_compact=0.00635, loss_align=0.00966
+[memory] screw: keys=4096, knowledge=20000
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 155/155 [01:35<00:00,  1.63it/s]
+
+--- Results Version 2 after 'screw' ---
+  Image AUROC: 0.500228
+  Pixel AUROC: 0.839126
+  Pixel AUPR:  0.129824
+  FM (Image):  1.111691e-01
+  FM (Pixel):  5.527058e-02
+--------------------------------------------------
+
+=== Task 11/15: tile ===
+[training] Version 2 - loss_compact=0.00490, loss_align=0.00963
+[memory] tile: keys=4096, knowledge=20000
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 170/170 [11:51<00:00,  4.18s/it]
+
+--- Results Version 2 after 'tile' ---
+  Image AUROC: 0.515719
+  Pixel AUROC: 0.829006
+  Pixel AUPR:  0.136584
+  FM (Image):  1.124695e-01
+  FM (Pixel):  5.265533e-02
+--------------------------------------------------
+
+=== Task 12/15: toothbrush ===
+[training] Version 2 - loss_compact=0.00665, loss_align=0.00816
+[memory] toothbrush: keys=4096, knowledge=11700
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 175/175 [01:52<00:00,  1.56it/s]
+
+--- Results Version 2 after 'toothbrush' ---
+  Image AUROC: 0.517852
+  Pixel AUROC: 0.830864
+  Pixel AUPR:  0.135454
+  FM (Image):  1.146143e-01
+  FM (Pixel):  5.020465e-02
+--------------------------------------------------
+
+=== Task 13/15: transistor ===
+[training] Version 2 - loss_compact=0.00717, loss_align=0.01011
+[memory] transistor: keys=4096, knowledge=20000
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 187/187 [02:08<00:00,  1.46it/s]
+
+--- Results Version 2 after 'transistor' ---
+  Image AUROC: 0.553268
+  Pixel AUROC: 0.805959
+  Pixel AUPR:  0.121230
+  FM (Image):  1.166378e-01
+  FM (Pixel):  4.844537e-02
+--------------------------------------------------
+
+=== Task 14/15: wood ===
+[training] Version 2 - loss_compact=0.00325, loss_align=0.00776
+[memory] wood: keys=4096, knowledge=20000
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 197/197 [02:18<00:00,  1.42it/s]
+
+--- Results Version 2 after 'wood' ---
+  Image AUROC: 0.561004
+  Pixel AUROC: 0.802695
+  Pixel AUPR:  0.118681
+  FM (Image):  1.185531e-01
+  FM (Pixel):  4.692768e-02
+--------------------------------------------------
+
+=== Task 15/15: zipper ===
+[training] Version 2 - loss_compact=0.00560, loss_align=0.00816
+[memory] zipper: keys=4096, knowledge=20000
+Testing Version 2: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 216/216 [02:34<00:00,  1.40it/s]
+
+--- Results Version 2 after 'zipper' ---
+  Image AUROC: 0.544479
+  Pixel AUROC: 0.789339
+  Pixel AUPR:  0.103129
+  FM (Image):  1.200584e-01
+  FM (Pixel):  4.600576e-02
+--------------------------------------------------
+
+================================================================================
+STARTING VERSION 3: BASELINE (NO PROMPTS, NO META-LEARNING)
+================================================================================
+
+============================================================
+ABLATION STUDY - VERSION 3
+Configuration: WITHOUT Fast/Slow Prompts
+              + WITHOUT Meta-Learning (baseline)
+============================================================
+
+Sanity check passed: forward works on mps
+
+=== Task 1/15: bottle ===
+[training] Version 3 - No training (baseline)
+[memory] bottle: keys=4096, knowledge=20000
+Testing Version 3: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 11/11 [00:05<00:00,  2.09it/s]
+
+--- Results Version 3 after 'bottle' ---
+  Image AUROC: 0.926984
+  Pixel AUROC: 0.913513
+  Pixel AUPR:  0.429661
+  FM (Image):  0.000000e+00
+  FM (Pixel):  0.000000e+00
+--------------------------------------------------
+
+=== Task 2/15: cable ===
+[training] Version 3 - No training (baseline)
+[memory] cable: keys=4096, knowledge=20000
+Testing Version 3: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 30/30 [00:12<00:00,  2.33it/s]
+
+--- Results Version 3 after 'cable' ---
+  Image AUROC: 0.692308
+  Pixel AUROC: 0.775518
+  Pixel AUPR:  0.146800
+  FM (Image):  0.000000e+00
+  FM (Pixel):  0.000000e+00
+--------------------------------------------------
+
+=== Task 3/15: capsule ===
+[training] Version 3 - No training (baseline)
+[memory] capsule: keys=4096, knowledge=20000
+Testing Version 3: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 46/46 [00:17<00:00,  2.62it/s]
+
+--- Results Version 3 after 'capsule' ---
+  Image AUROC: 0.527153
+  Pixel AUROC: 0.834596
+  Pixel AUPR:  0.137492
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -9.604049e-10
+--------------------------------------------------
+
+=== Task 4/15: carpet ===
+[training] Version 3 - No training (baseline)
+[memory] carpet: keys=4096, knowledge=20000
+Testing Version 3: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 61/61 [00:22<00:00,  2.65it/s]
+
+--- Results Version 3 after 'carpet' ---
+  Image AUROC: 0.537080
+  Pixel AUROC: 0.823947
+  Pixel AUPR:  0.129485
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -6.402699e-10
+--------------------------------------------------
+
+=== Task 5/15: grid ===
+[training] Version 3 - No training (baseline)
+[memory] grid: keys=4096, knowledge=20000
+Testing Version 3: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 70/70 [00:25<00:00,  2.74it/s]
+
+--- Results Version 3 after 'grid' ---
+  Image AUROC: 0.534878
+  Pixel AUROC: 0.826711
+  Pixel AUPR:  0.122370
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -5.495875e-10
+--------------------------------------------------
+
+=== Task 6/15: hazelnut ===
+[training] Version 3 - No training (baseline)
+[memory] hazelnut: keys=4096, knowledge=20000
+Testing Version 3: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 84/84 [00:33<00:00,  2.53it/s]
+
+--- Results Version 3 after 'hazelnut' ---
+  Image AUROC: 0.535811
+  Pixel AUROC: 0.836963
+  Pixel AUPR:  0.127496
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -4.396700e-10
+--------------------------------------------------
+
+=== Task 7/15: leather ===
+[training] Version 3 - No training (baseline)
+[memory] leather: keys=4096, knowledge=20000
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 100/100 [00:39<00:00,  2.52it/s]
+
+--- Results Version 3 after 'leather' ---
+  Image AUROC: 0.561937
+  Pixel AUROC: 0.849245
+  Pixel AUPR:  0.124109
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -3.663917e-10
+--------------------------------------------------
+
+=== Task 8/15: metal_nut ===
+[training] Version 3 - No training (baseline)
+[memory] metal_nut: keys=4096, knowledge=20000
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 114/114 [00:45<00:00,  2.50it/s]
+
+--- Results Version 3 after 'metal_nut' ---
+  Image AUROC: 0.571422
+  Pixel AUROC: 0.852086
+  Pixel AUPR:  0.170696
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -3.072668e-10
+--------------------------------------------------
+
+=== Task 9/15: pill ===
+[training] Version 3 - No training (baseline)
+[memory] pill: keys=4096, knowledge=20000
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 135/135 [00:55<00:00,  2.42it/s]
+
+--- Results Version 3 after 'pill' ---
+  Image AUROC: 0.580834
+  Pixel AUROC: 0.859397
+  Pixel AUPR:  0.181923
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -2.636651e-10
+--------------------------------------------------
+
+=== Task 10/15: screw ===
+[training] Version 3 - No training (baseline)
+[memory] screw: keys=4096, knowledge=20000
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 155/155 [01:03<00:00,  2.43it/s]
+
+--- Results Version 3 after 'screw' ---
+  Image AUROC: 0.578132
+  Pixel AUROC: 0.864057
+  Pixel AUPR:  0.171873
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -2.302655e-10
+--------------------------------------------------
+
+=== Task 11/15: tile ===
+[training] Version 3 - No training (baseline)
+[memory] tile: keys=4096, knowledge=20000
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 170/170 [01:08<00:00,  2.47it/s]
+
+--- Results Version 3 after 'tile' ---
+  Image AUROC: 0.595792
+  Pixel AUROC: 0.857962
+  Pixel AUPR:  0.178587
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -2.039152e-10
+--------------------------------------------------
+
+=== Task 12/15: toothbrush ===
+[training] Version 3 - No training (baseline)
+[memory] toothbrush: keys=4096, knowledge=11700
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 175/175 [01:09<00:00,  2.51it/s]
+
+--- Results Version 3 after 'toothbrush' ---
+  Image AUROC: 0.600134
+  Pixel AUROC: 0.860074
+  Pixel AUPR:  0.177737
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -2.205029e-10
+--------------------------------------------------
+
+=== Task 13/15: transistor ===
+[training] Version 3 - No training (baseline)
+[memory] transistor: keys=4096, knowledge=20000
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 187/187 [01:18<00:00,  2.38it/s]
+
+--- Results Version 3 after 'transistor' ---
+  Image AUROC: 0.601830
+  Pixel AUROC: 0.844338
+  Pixel AUPR:  0.171690
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -1.998195e-10
+--------------------------------------------------
+
+=== Task 14/15: wood ===
+[training] Version 3 - No training (baseline)
+[memory] wood: keys=4096, knowledge=20000
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 197/197 [01:25<00:00,  2.30it/s]
+
+--- Results Version 3 after 'wood' ---
+  Image AUROC: 0.608804
+  Pixel AUROC: 0.839326
+  Pixel AUPR:  0.172689
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -1.824821e-10
+--------------------------------------------------
+
+=== Task 15/15: zipper ===
+[training] Version 3 - No training (baseline)
+[memory] zipper: keys=4096, knowledge=20000
+Testing Version 3: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 216/216 [01:38<00:00,  2.19it/s]
+
+--- Results Version 3 after 'zipper' ---
+  Image AUROC: 0.600442
+  Pixel AUROC: 0.836466
+  Pixel AUPR:  0.166931
+  FM (Image):  0.000000e+00
+  FM (Pixel):  -1.677518e-10
+--------------------------------------------------
+
+================================================================================
+ABLATION STUDY SUMMARY
+================================================================================
+
+Configuration Comparison:
+------------------------------------------------------------
+Version 1: No Fast/Slow Prompts (Single Global Prompt) + Meta-Learning
+Version 2: Fast/Slow Prompts + No Meta-Learning (Standard Training)
+Version 3: Baseline (No Prompts + No Meta-Learning)
+------------------------------------------------------------
+
+Final Performance Comparison:
+------------------------------------------------------------
+Metric               Version 1       Version 2       Version 3      
+------------------------------------------------------------
+Final Image Auroc    0.565279        0.544479        0.600442       
+Final Pixel Auroc    0.792709        0.789339        0.836466       
+Final Pixel Aupr     0.095368        0.103129        0.166931       
+Fm Image             5.638428e-02    1.200584e-01    0.000000e+00   
+Fm Pixel             6.219674e-02    4.600576e-02    -1.677518e-10  
+------------------------------------------------------------
+
+Performance Gains over Baseline (Version 3):
+------------------------------------------------------------
+
+Version 1:
+  Image AUROC: -3.52%
+  Pixel AUROC: -4.38%
+  Pixel AUPR:  -7.16%
+  FM reduction (Image): -5.638428e-02 (worse)
+  FM reduction (Pixel): -6.219674e-02 (worse)
+
+Version 2:
+  Image AUROC: -5.60%
+  Pixel AUROC: -4.71%
+  Pixel AUPR:  -6.38%
+  FM reduction (Image): -1.200584e-01 (worse)
+  FM reduction (Pixel): -4.600576e-02 (worse)
+
+================================================================================
+ABLATION STUDY COMPLETE
+================================================================================
+
+
+
+candle     : 0.9901
+capsules   : 0.9617
+cashew     : 0.9998
+chewinggum : 0.9996
+fryum      : 1.0000
+macaroni1  : 0.9889
+macaroni2  : 0.9665
+pcb1       : 0.9983
+pcb2       : 0.9874
+pcb3       : 0.9928
+pcb4       : 0.9991
