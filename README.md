@@ -1,41 +1,76 @@
- UCAD-Style Continual Anomaly Detection
+# UCAD-Style Continual Anomaly Detection
 
-This README explains how to run the provided **Fast and slow prompt tuning for continual anomaly detection** experiment end to end.
+This repository contains code for **Continual anomaly detection** with **fast and slow prompt tuning**
 
-## 1. What this code does
+The instructions below are aligned to the current root-level script:
 
-The script trains and evaluates a **continual anomaly detection** pipeline on **MVTec AD**.
+```bash
+python visa.py
+```
 
-Main components in the code:
-- **Frozen ViT-B/16** backbone
-- **Fast / slow additive prompts** injected per transformer block
-- **Inner / outer meta-training**
-- **Per-task memory**:
-  - `keys` from an early layer
-  - `knowledge` from the final layer
-- **Task-agnostic inference** by choosing the task with the **lowest image anomaly score**
-- **Structure-aware contrastive learning (SCL)** using **SAM** (or SLIC fallback)
-- **Continual evaluation** after each task on all seen categories
+---
 
-The default experiment runs on the 15 MVTec AD categories:
-`bottle, cable, capsule, carpet, grid, hazelnut, leather, metal_nut, pill, screw, tile, toothbrush, transistor, wood, zipper`
+## 1. Overview
+
+The current pipeline implements:
+
+* a **frozen ViT-B/16** backbone
+* **fast / slow additive prompts** injected into each transformer block
+* **inner / outer meta-training**
+* **per-task memory**
+
+  * `keys` from an early layer
+  * `knowledge` from the final layer
+* **task-agnostic inference** by selecting the task with the **lowest image anomaly score**
+* **structure-aware contrastive learning (SCL)** using **SAM** with a **SLIC fallback**
+* **continual evaluation** after each task on all seen categories
+
+The script supports both:
+
+* **VisA**
+* **MVTec AD**
+
+### Default setup in `visa.py`
+
+The current `__main__` block is configured to run on **VisA** by default using these 12 categories:
+
+```python
+[
+    'candle', 'capsules', 'cashew', 'chewinggum',
+    'fryum', 'macaroni1', 'macaroni2',
+    'pcb1', 'pcb2', 'pcb3', 'pcb4', 'pipe_fryum'
+]
+```
+
+If you want to run on **MVTec AD**, change:
+
+```python
+dataset = "mvtec"
+```
+
+and replace the category list with the 15 MVTec AD categories.
 
 ---
 
 ## 2. Recommended environment
 
-- Python 3.10 or 3.11
-- PyTorch with CUDA if available
-- GPU strongly recommended
+Recommended setup:
+
+* Python **3.10** or **3.11**
+* PyTorch with CUDA if available
+* GPU strongly recommended
 
 The script automatically uses:
-- `cuda` if available
-- otherwise `mps` on Apple Silicon
-- otherwise `cpu`
+
+* `cuda` if available
+* otherwise `mps` on Apple Silicon
+* otherwise `cpu`
 
 ---
 
 ## 3. Create the environment
+
+Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
@@ -45,35 +80,98 @@ source .venv/bin/activate   # macOS / Linux
 python -m pip install --upgrade pip
 ```
 
-Install PyTorch first using the command appropriate for your system from the official PyTorch install page.
+### Install dependencies
 
-Then install the required Python packages:
+You can install from the repo requirements file:
+
+```bash
+pip install -r requirements.txt
+```
+
+Or install the main packages manually:
 
 ```bash
 pip install torch torchvision numpy scikit-image scikit-learn tqdm Pillow
 pip install opencv-python timm
 pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
-Or simply just install everything in ```requirement.txt```
 
-If `segment-anything` is not installed or the SAM checkpoint path is missing, the code falls back to **SLIC** for structure segmentation.
+### Notes
+
+* `segment-anything` is optional. If it is not installed, the script falls back to **SLIC** for structure segmentation.
+* `timm` is optional for the current default run.
+* `opencv-python` is optional for most of the current execution path, but safe to install.
 
 ---
 
-## 4. Download the dataset
+## 4. Prepare the dataset
 
-This project can be prepared with either **MVTec AD** or **VisA**. MVTec AD already matches the current loader directly. VisA needs one extra conversion step before it can be used with this exact script.
+This script supports both **VisA** and **MVTec AD**.
 
-### 4.1 MVTec AD
+You only need to prepare the dataset you want to use.
 
-The official MVTec AD site provides both the full dataset and per-category downloads. Each category contains `train`, `test`, and `ground_truth`, which is exactly the structure expected by your current `MVTecAD` loader. citeturn535417search2turn535417search6
+---
 
-#### Expected folder structure
+## 5. Expected dataset structure
 
-After extraction, the root should look like this:
+### 5.1 VisA
+
+The current default run in `visa.py` uses:
+
+```python
+dataset = "visa"
+```
+
+The `VisA` loader in this repository expects the following structure:
 
 ```txt
-mvtec2d/
+DATA_ROOT/
+├── candle/
+│   └── Data/
+│       └── Images/
+│           ├── Normal/
+│           ├── Anomaly/
+│           └── Mask/
+├── capsules/
+│   └── Data/
+│       └── Images/
+│           ├── Normal/
+│           ├── Anomaly/
+│           └── Mask/
+├── cashew/
+├── chewinggum/
+├── fryum/
+├── macaroni1/
+├── macaroni2/
+├── pcb1/
+├── pcb2/
+├── pcb3/
+├── pcb4/
+└── pipe_fryum/
+```
+
+In other words, the script expects:
+
+```python
+root/category/Data/Images/Normal/*
+root/category/Data/Images/Anomaly/*
+root/category/Data/Images/Mask/*
+```
+
+If masks are missing, the script can still run, but missing masks will be treated as zero masks during pixel-level evaluation.
+
+### 5.2 MVTec AD
+
+If you switch to:
+
+```python
+dataset = "mvtec"
+```
+
+the `MVTecAD` loader expects:
+
+```txt
+DATA_ROOT/
 ├── bottle/
 │   ├── train/
 │   │   └── good/
@@ -92,7 +190,7 @@ mvtec2d/
 └── zipper/
 ```
 
-This matches what the loader expects:
+This matches:
 
 ```python
 root/category/train/good/*
@@ -100,131 +198,41 @@ root/category/test/<defect_type>/*
 root/category/ground_truth/<defect_type>/*
 ```
 
-#### Rename / place the dataset
-
-If your extracted folder is named something else, you can either:
-- rename it to `mvtec2d`, or
-- keep the original name and update `DATA_ROOT` in the script.
-
-Example:
+Typical MVTec AD category list:
 
 ```python
-DATA_ROOT = "/absolute/path/to/mvtec2d"
-```
-
-### 4.2 VisA
-
-VisA is released by Amazon Science as the **Visual Anomaly** dataset with **10,821** images across **12** objects, with both image-level and pixel-level labels. Amazon Science also provides the official dataset page, and the `amazon-science/spot-diff` repository documents the download location and raw folder tree. citeturn535417search0turn535417search5turn535417search12
-
-#### Raw VisA structure
-
-The official VisA release uses a different layout from MVTec, roughly like:
-
-```txt
-VisA/
-├── candle/
-│   ├── Data/
-│   │   ├── Images/
-│   │   │   ├── Anomaly/
-│   │   │   └── Normal/
-│   │   └── Masks/
-│   │       └── Anomaly/
-│   └── image_anno.csv
-├── capsules/
-├── cashew/
-├── chewinggum/
-├── fryum/
-├── macaroni1/
-├── macaroni2/
-├── pcb1/
-├── pcb2/
-├── pcb3/
-├── pcb4/
-└── pipe_fryum/
-```
-
-Because your current code expects the MVTec folder convention, VisA will **not** run directly with the existing `MVTecAD` class. You need to convert each VisA category into a MVTec-like layout first.
-
-#### Recommended converted VisA structure
-
-Convert VisA into:
-
-```txt
-visa_mvtec_style/
-├── candle/
-│   ├── train/
-│   │   └── good/
-│   ├── test/
-│   │   ├── good/
-│   │   └── anomaly/
-│   └── ground_truth/
-│       └── anomaly/
-├── capsules/
-├── cashew/
-├── chewinggum/
-├── fryum/
-├── macaroni1/
-├── macaroni2/
-├── pcb1/
-├── pcb2/
-├── pcb3/
-├── pcb4/
-└── pipe_fryum/
-```
-
-Then point:
-
-```python
-DATA_ROOT = "/absolute/path/to/visa_mvtec_style"
-```
-
-#### Practical conversion rule
-
-A simple rule is:
-- use VisA normal training images as `train/good/`
-- put normal test images into `test/good/`
-- put anomalous test images into `test/anomaly/`
-- put anomalous masks into `ground_truth/anomaly/`
-
-The exact train/test split should follow the official VisA metadata CSV so that your evaluation matches the released benchmark. The `spot-diff` repository documents the official raw data tree, which is the safest source to follow when writing the conversion script. citeturn535417search5
-
-#### VisA category list
-
-The 12 VisA categories are:
-
-```python
-visa_categories = [
-    "candle", "capsules", "cashew", "chewinggum",
-    "fryum", "macaroni1", "macaroni2",
-    "pcb1", "pcb2", "pcb3", "pcb4", "pipe_fryum"
+[
+    'bottle', 'cable', 'capsule', 'carpet', 'grid',
+    'hazelnut', 'leather', 'metal_nut', 'pill', 'screw',
+    'tile', 'toothbrush', 'transistor', 'wood', 'zipper'
 ]
 ```
-  
+
 ---
 
-## 5. Download the SAM checkpoint
+## 6. Download the SAM checkpoint
 
-For the best version of **SCL**, the script uses **SAM ViT-B**.
+For the best version of **SCL**, the script can use **SAM ViT-B**.
 
-Download the **ViT-B SAM checkpoint** and save it as:
+Download the checkpoint:
 
-```txt
-sam_vit_b_01ec64.pth
+```bash
+curl -O https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 ```
 
-Place it somewhere accessible, for example:
+You can place it anywhere convenient, for example:
 
 ```txt
-project/
-├── ucad_experiment.py
-└── checkpoints/
-    └── sam_vit_b_01ec64.pth
+FSCIL/
+├── visa.py
+├── requirements.txt
+└── sam_vit_b_01ec64.pth
 ```
 
 Then set:
 
 ```python
-SAM_CHECKPOINT = "/absolute/path/to/checkpoints/sam_vit_b_01ec64.pth"
+SAM_CHECKPOINT = "/absolute/path/to/sam_vit_b_01ec64.pth"
 ```
 
 If you do not want to use SAM, set:
@@ -233,22 +241,45 @@ If you do not want to use SAM, set:
 SAM_CHECKPOINT = None
 ```
 
-The code will then use **SLIC** instead of SAM.
+The script will then use **SLIC** instead of SAM.
 
 ---
 
-## 6. Configure paths in the script
+## 7. Configure paths in `visa.py`
 
-At the bottom of the script, update these two lines:
+At the bottom of `visa.py`, update the dataset and checkpoint paths in the `__main__` block.
+
+### Example for VisA
+
+```python
+if __name__ == "__main__":
+    DATA_ROOT = "/absolute/path/to/VisA_20220922"
+    SAM_CHECKPOINT = "/absolute/path/to/sam_vit_b_01ec64.pth"
+```
+
+### Example without SAM
+
+```python
+if __name__ == "__main__":
+    DATA_ROOT = "/absolute/path/to/VisA_20220922"
+    SAM_CHECKPOINT = None
+```
+
+### Example for MVTec AD
 
 ```python
 DATA_ROOT = "/absolute/path/to/mvtec2d"
-SAM_CHECKPOINT = "/absolute/path/to/sam_vit_b_01ec64.pth"
+```
+
+and also change:
+
+```python
+dataset = "mvtec"
 ```
 
 ---
 
-## 7. Run the experiment
+## 8. Run the experiment
 
 ### Default run
 
@@ -257,93 +288,163 @@ python visa.py
 ```
 
 This will:
+
 1. initialize the ViT prompt extractor
 2. build the SAM-based or SLIC-based segmenter
-3. train task by task over the 15 MVTec categories
+3. train task by task over the selected categories
 4. build per-task memory after each task
 5. evaluate on all seen tasks after each session
 6. print metrics such as:
-   - Image AUROC
-   - Pixel AUROC
-   - Pixel AUPR
-   - forgetting measures
+
+   * Image AUROC
+   * Pixel AUROC
+   * Pixel AUPR
+   * forgetting measures
 
 ---
 
+## 9. Current default run settings
 
-## 8. Expected console output
+The current `visa.py` default configuration uses:
 
-During training you should see logs similar to:
+```python
+run_ucad(
+    categories=all_categories,
+    data_root=DATA_ROOT,
+    image_size=224,
+    batch_size=8,
+    sam_checkpoint=SAM_CHECKPOINT,
+    max_keys=4096,
+    max_knowledge=20000,
+    inner_steps=5,
+    outer_steps=5,
+    lr_fast=3e-2,
+    lr_slow=1e-4,
+    align_coef=0.5,
+    scl_coef=0.1,
+    pooling_mode='ratio',
+    image_topk=0.02,
+    knn_k=3,
+    use_calibration='zscore',
+    use_multiscale=True,
+    metric='euclidean',
+    dataset='visa',
+)
+```
+
+So by default, it runs with:
+
+* **VisA**
+* **224 × 224** input size
+* **batch size 8**
+* **top 2% patch pooling**
+* **3-NN patch scoring**
+* **z-score calibration**
+* **multiscale inference enabled**
+
+---
+
+## 10. Expected console output
+
+During training, you should see logs similar to:
 
 ```txt
 [device] Using: cuda
 [init] Building extractor + segmenter…
 
-=== Task 1/15: bottle ===
+=== Task 1/12: candle ===
 [inner] mean loss: ...
 [outer] loss_q=... | align=... | scl=... | steps=...
-[memory] bottle: keys=4096 | knowledge=20000
-[calib] bottle: mode=zscore mu=... sigma=... thr=...
+[memory] candle: keys=4096 | knowledge=20000
+[calib] candle: mode=zscore mu=... sigma=... thr=...
 [eval] router=imgscore_ucad(...)
 Testing (UCAD-style): 100%|██████████| ...
 
---- Results after task 'bottle' (1 seen) ---
+--- Results after task 'candle' (1 seen) ---
 Image AUROC: ...
 Pixel AUROC: ...
 Pixel AUPR (all pixels): ...
 ```
 
+If you switch to MVTec AD, the category names and number of tasks will change accordingly.
+
 ---
 
-## 9. What each important argument means
+## 11. Important arguments
 
 ### Data / model
 
-- `categories`: order of continual tasks
-- `data_root`: root folder of MVTec AD
-- `image_size`: resize and crop size, default `224`
-- `batch_size`: batch size for train/test loaders
-- `sam_checkpoint`: path to SAM ViT-B weights, or `None`
+* `categories`: order of continual tasks
+* `data_root`: root folder of the dataset
+* `image_size`: resize and crop size, default `224`
+* `batch_size`: batch size for train/test loaders
+* `sam_checkpoint`: path to SAM ViT-B weights, or `None`
+* `dataset`: either `'visa'` or `'mvtec'`
 
 ### Memory
 
-- `max_keys`: max number of early-layer key vectors per task
-- `max_knowledge`: max number of final-layer knowledge vectors per task
+* `max_keys`: maximum number of early-layer key vectors per task
+* `max_knowledge`: maximum number of final-layer knowledge vectors per task
 
 ### Meta-learning
 
-- `inner_steps`: number of fast prompt update steps
-- `outer_steps`: number of slow prompt update steps
-- `lr_fast`: learning rate for fast prompts
-- `lr_slow`: learning rate for slow prompts
-- `align_coef`: weight of memory alignment loss
-- `scl_coef`: weight of structure-aware contrastive loss
+* `inner_steps`: number of fast prompt update steps
+* `outer_steps`: number of slow prompt update steps
+* `lr_fast`: learning rate for fast prompts
+* `lr_slow`: learning rate for slow prompts
+* `align_coef`: weight of memory alignment loss
+* `scl_coef`: weight of structure-aware contrastive loss
 
 ### Inference / scoring
 
-- `pooling_mode`: `'count'` or `'ratio'`
-- `image_topk`: top-k count or top-k ratio depending on mode
-- `knn_k`: number of nearest neighbors used for patch scoring
-- `use_calibration`: `None`, `'zscore'`, or `'robust'`
-- `use_multiscale`: whether to fuse multiple scales
-- `metric`: `'euclidean'` or `'cosine'`
-- `center_quantile`: optional baseline subtraction before pooling
+* `pooling_mode`: `'count'` or `'ratio'`
+* `image_topk`: top-k count or top-k ratio depending on `pooling_mode`
+* `knn_k`: number of nearest neighbors used for patch scoring
+* `use_calibration`: `None`, `'zscore'`, or `'robust'`
+* `use_multiscale`: whether to fuse multiple scales
+* `metric`: `'euclidean'` or `'cosine'`
+* `center_quantile`: optional baseline subtraction before pooling
 
-## Extra - Common issues and fixes
+---
 
-### Issue 1: `Category not found`
+## 12. Common issues and fixes
 
-Error:
+### Issue 1: VisA path error
+
+Error example:
+
+```txt
+AssertionError: [VisA] Missing: ...
+```
+
+Fix:
+
+* make sure `DATA_ROOT` points to the folder containing all 12 VisA category folders
+* make sure each category contains:
+
+  * `Data/Images/Normal`
+  * `Data/Images/Anomaly`
+* if masks are available, place them under:
+
+  * `Data/Images/Mask`
+
+### Issue 2: MVTec category path error
+
+Error example:
 
 ```txt
 AssertionError: Category not found: ...
 ```
 
 Fix:
-- make sure `DATA_ROOT` points to the folder containing all 15 category folders
-- make sure folder names match exactly, e.g. `metal_nut`, `toothbrush`
 
-### Issue 2: SAM import error
+* make sure `DATA_ROOT` points to the folder containing all MVTec category folders
+* make sure folder names match exactly, for example:
+
+  * `metal_nut`
+  * `toothbrush`
+
+### Issue 3: SAM import error
 
 Error:
 
@@ -357,20 +458,34 @@ Fix:
 pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
 
-Or set:
+Or disable SAM:
 
 ```python
 SAM_CHECKPOINT = None
 ```
 
-### Issue 3: SAM checkpoint not found
+### Issue 4: SAM checkpoint not found
 
 Fix:
-- verify the path to `sam_vit_b_01ec64.pth`
-- make sure the file name is correct
-- otherwise disable SAM and use SLIC fallback
 
-### Issue 4: Out-of-memory on GPU
+* verify the path to `sam_vit_b_01ec64.pth`
+* make sure the file name is correct
+* otherwise disable SAM and use the SLIC fallback
+
+### Issue 5: torchvision too old
+
+Error example:
+
+```txt
+Please install/upgrade torchvision>=0.13 to use ViT_B_16.
+```
+
+Fix:
+
+* upgrade `torchvision`
+* reinstall `torch` and `torchvision` with matching versions
+
+### Issue 6: Out-of-memory on GPU
 
 Try reducing:
 
@@ -382,13 +497,16 @@ outer_steps = 2
 use_multiscale = False
 ```
 
-### Issue 5: very slow runtime
+You can also test on fewer categories first.
 
-This is expected if:
-- SAM is enabled
-- many categories are used
-- outer steps are large
-- multiscale inference is enabled
+### Issue 7: Very slow runtime
+
+This is expected when:
+
+* SAM is enabled
+* many categories are used
+* `outer_steps` is large
+* multiscale inference is enabled
 
 For faster experiments:
 
@@ -401,31 +519,57 @@ batch_size = 4
 
 ---
 
-## 15. Reproducibility
+## 13. Reproducibility
 
-The script already fixes random seeds via:
+The script sets random seeds via:
 
 ```python
 set_seed(1337)
 ```
 
-This helps, but exact reproducibility can still vary depending on:
-- GPU vs CPU
-- CUDA / cuDNN versions
-- PyTorch version
-- whether SAM or SLIC is used
+This improves reproducibility, although exact results can still vary depending on:
+
+* GPU vs CPU
+* CUDA / cuDNN versions
+* PyTorch version
+* whether SAM or SLIC is used
 
 ---
 
-## Final checklist
+## 14. Repository structure
+
+A simplified view of the current repository root:
+
+```txt
+FSCIL/
+├── README.md
+├── requirements.txt
+├── visa.py
+├── main.py
+├── app.py
+├── loadMVTec.py
+├── patchcore.py
+├── patchcoresam.py
+├── patchcoresamfs.py
+├── FS_SAM/
+├── UCAD-main/
+└── ...
+```
+
+The instructions in this README are specifically intended for the current root-level `visa.py` script.
+
+---
+
+## 15. Final checklist
 
 Before running, confirm all of the following:
 
-- [ ] `ucad_experiment.py` is saved
-- [ ] Python environment is activated
-- [ ] required packages are installed
-- [ ] MVTec AD is downloaded and extracted
-- [ ] `DATA_ROOT` points to the correct folder
-- [ ] SAM checkpoint is downloaded, or `SAM_CHECKPOINT=None`
-- [ ] category names in the script match the dataset folders
-- [ ] you tested on 2–3 categories first
+* [ ] `visa.py` is available in the repo root
+* [ ] the Python environment is activated
+* [ ] required packages are installed
+* [ ] the dataset is downloaded and extracted
+* [ ] `DATA_ROOT` points to the correct folder
+* [ ] `dataset` is set correctly to `'visa'` or `'mvtec'`
+* [ ] the SAM checkpoint is downloaded, or `SAM_CHECKPOINT = None`
+* [ ] category names in the script match the dataset folders
+* [ ] you tested on 1 to 3 categories first before a full run
