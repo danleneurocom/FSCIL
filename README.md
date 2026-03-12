@@ -429,7 +429,3 @@ Before running, confirm all of the following:
 - [ ] SAM checkpoint is downloaded, or `SAM_CHECKPOINT=None`
 - [ ] category names in the script match the dataset folders
 - [ ] you tested on 2–3 categories first
-
-
-
-If you want, I can also format it specifically for your repo’s README.md style, for example with badges, a project overview s
